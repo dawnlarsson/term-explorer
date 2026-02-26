@@ -15,13 +15,15 @@ typedef struct
         bool is_dir;
 } FileEntry;
 
-FileEntry entries[1024];
+// Dynamic array state
+FileEntry *entries = NULL;
+int entry_capacity = 0;
 int entry_count = 0;
 
 float target_scroll = 0.0f;
 float current_scroll = 0.0f;
 int selected_idx = 0;
-bool dragging_scroll = false; // State for tracking the scrollbar drag
+bool dragging_scroll = false;
 
 char cwd[PATH_MAX];
 
@@ -49,10 +51,18 @@ void load_dir(const char *path)
         dragging_scroll = false;
 
         struct dirent *dir;
-        while ((dir = readdir(d)) != NULL && entry_count < 1024)
+        while ((dir = readdir(d)) != NULL)
         {
                 if (!strcmp(dir->d_name, "."))
                         continue;
+
+                // Dynamically grow the array via orelse to catch out-of-memory gracefully
+                if (entry_count >= entry_capacity)
+                {
+                        entry_capacity = entry_capacity == 0 ? 256 : entry_capacity * 2;
+                        entries = realloc(entries, entry_capacity * sizeof(FileEntry)) orelse return;
+                }
+
                 struct stat st;
                 stat(dir->d_name, &st);
 
@@ -68,16 +78,31 @@ int main(void)
 {
         term_init() orelse return 1;
         defer term_restore();
+        defer free(entries); // Cleanup the global array perfectly using Prism
 
         load_dir(".");
 
+        bool first_frame = true;
+
         while (1)
         {
-                int key = term_poll(16);
+                float diff = target_scroll - current_scroll;
+                if (diff < 0)
+                        diff = -diff;
+                bool is_animating = !dragging_scroll && (diff > 0.01f);
+
+                // Use 0 timeout on the first frame so it rushes down to render the UI!
+                int timeout = -1;
+                if (is_animating)
+                        timeout = 16;
+                if (first_frame)
+                        timeout = 0;
+
+                int key = term_poll(timeout);
+                first_frame = false;
 
                 int cell_w = 14;
                 int cell_h = 6;
-                // Reserve 1 column width for the scrollbar on the right
                 int cols = (term_width - 1) / cell_w;
                 if (cols < 1)
                         cols = 1;
@@ -88,7 +113,7 @@ int main(void)
                 int track_h = term_height - 1 - list_start_y;
 
                 // Input Handling
-                if (key == 'q')
+                if (key == 'q' || key == KEY_ESC)
                         break;
                 if (key == 'j')
                         term_mouse.wheel += 1;
@@ -119,15 +144,15 @@ int main(void)
                 }
 
                 // Keyboard Enter-to-Open
-                if (key == KEY_ENTER && entries[selected_idx].is_dir)
+                if (key == KEY_ENTER && entry_count > 0 && entries[selected_idx].is_dir)
                 {
                         load_dir(entries[selected_idx].name);
                         continue;
                 }
 
-                // Auto-Scroll Camera Tracking (Now only runs when selection changes!)
+                // Auto-Scroll Camera Tracking
                 int scroll_offset = (int)current_scroll;
-                if (selection_changed)
+                if (selection_changed && entry_count > 0)
                 {
                         int sel_r = selected_idx / cols;
                         int sel_y = list_start_y + (sel_r * cell_h) - scroll_offset;
@@ -187,7 +212,6 @@ int main(void)
                         if (screen_y + cell_h < 0 || screen_y >= term_height)
                                 continue;
 
-                        // Ensure hover ignores the rightmost column so scrollbar clicks don't hit files
                         bool hovered = (!dragging_scroll &&
                                         term_mouse.x >= screen_x && term_mouse.x < screen_x + cell_w &&
                                         term_mouse.y >= screen_y && term_mouse.y < screen_y + cell_h &&
@@ -241,7 +265,6 @@ int main(void)
                 // Draw Scrollbar
                 if (max_scroll_lines > 0)
                 {
-                        // Darker background for the track
                         ui_rect(term_width - 1, track_y, 1, track_h, (Color){30, 30, 30});
 
                         float visible_ratio = (float)track_h / (float)(rows * cell_h);
@@ -267,7 +290,7 @@ int main(void)
                 ui_text(1, 0, header, (Color){0, 0, 0}, clr_bar);
 
                 ui_rect(0, term_height - 1, term_width, 1, clr_bar);
-                ui_text(1, term_height - 1, " Arrows: Navigate | Enter/Double-Click: Open | 'q': Quit ", (Color){0, 0, 0}, clr_bar);
+                ui_text(1, term_height - 1, " Arrows: Navigate | Enter/Double-Click: Open | 'q'/ESC: Quit ", (Color){0, 0, 0}, clr_bar);
 
                 ui_cursor();
                 ui_end();
