@@ -17,12 +17,14 @@ typedef struct
 } Color;
 typedef struct
 {
-        char ch;
+        char ch[5]; // Upgraded for UTF-8 half-blocks
         Color fg, bg;
 } Cell;
 typedef struct
 {
         int x, y;
+        int sub_y;    // 0 = top half, 1 = bottom half
+        bool has_sub; // True if we have raw pixel-level tracking
         bool left, right, clicked;
         int wheel;
 } Mouse;
@@ -35,12 +37,48 @@ int term_width, term_height;
 static struct termios orig_termios;
 static volatile int resize_flag = 1;
 static Cell *canvas;
-static int fd_m = -1, raw_mx, raw_my, tc;
+static int fd_m = -1, raw_mx, raw_my;
+static int color_mode = 0;
 static char out_buf[1024 * 1024];
 
 static void on_resize(int s) { resize_flag = 1; }
+
+static void on_sigint(int s)
+{
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
+        printf("\x1b[0m\x1b[2J\x1b[H\x1b[?25h\x1b[?1006l\x1b[?1015l\x1b[?1003l");
+        fflush(stdout);
+        _exit(1);
+}
+
 static bool col_eq(Color a, Color b) { return a.r == b.r && a.g == b.g && a.b == b.b; }
 static int rgb256(Color c) { return 16 + (36 * (c.r * 5 / 255)) + (6 * (c.g * 5 / 255)) + (c.b * 5 / 255); }
+
+static int rgb_to_ansi16(Color c, bool is_bg)
+{
+        if (c.r == 0 && c.g == 0 && c.b == 0)
+                return is_bg ? 40 : 30;
+        if (c.r == 255 && c.g == 255 && c.b == 255)
+                return is_bg ? 107 : 97;
+        if (c.r == 170 && c.g == 170 && c.b == 170)
+                return is_bg ? 47 : 37;
+        if (c.r == 255 && c.g == 255 && c.b == 85)
+                return is_bg ? 103 : 93;
+        if (c.r == 0 && c.g == 255 && c.b == 0)
+                return is_bg ? 102 : 92;
+        if (c.r == 255 && c.g == 0 && c.b == 0)
+                return is_bg ? 101 : 91;
+        if (c.r == 255 && c.g == 255 && c.b == 0)
+                return is_bg ? 103 : 93;
+
+        int r = c.r > 127 ? 1 : 0;
+        int g = c.g > 127 ? 1 : 0;
+        int b = c.b > 127 ? 1 : 0;
+        int bright = (c.r > 191 || c.g > 191 || c.b > 191) ? 1 : 0;
+        int ansi_base = (r ? 1 : 0) | (g ? 2 : 0) | (b ? 4 : 0);
+
+        return (is_bg ? (bright ? 100 : 40) : (bright ? 90 : 30)) + ansi_base;
+}
 
 void term_restore(void)
 {
@@ -67,8 +105,25 @@ int term_init(void)
         if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1)
                 return 0;
 
+        signal(SIGINT, on_sigint);
+        signal(SIGTERM, on_sigint);
+        signal(SIGQUIT, on_sigint);
+
         char *ct = getenv("COLORTERM");
-        tc = ct && (!strcmp(ct, "truecolor") || !strcmp(ct, "24bit"));
+        char *term = getenv("TERM");
+        if (ct && (!strcmp(ct, "truecolor") || !strcmp(ct, "24bit")))
+        {
+                color_mode = 2;
+        }
+        else if (term && strstr(term, "256color"))
+        {
+                color_mode = 1;
+        }
+        else
+        {
+                color_mode = 0;
+        }
+
         fd_m = open("/dev/input/mice", O_RDONLY | O_NONBLOCK);
 
         setvbuf(stdout, out_buf, _IOFBF, sizeof(out_buf));
@@ -112,8 +167,11 @@ char term_poll(int timeout_ms)
                                 raw_my = 0;
                         else if (raw_my >= term_height * 16)
                                 raw_my = term_height * 16 - 1;
+
                         term_mouse.x = raw_mx / 8;
                         term_mouse.y = raw_my / 16;
+                        term_mouse.sub_y = (raw_my / 8) % 2;
+                        term_mouse.has_sub = true; // Raw Linux tracking is active
                 }
         }
 
@@ -132,6 +190,8 @@ char term_poll(int timeout_ms)
                                 term_mouse.y = y - 1;
                                 raw_mx = term_mouse.x * 8;
                                 raw_my = term_mouse.y * 16;
+                                term_mouse.has_sub = false; // ANSI sequence fallback
+
                                 bool down = (m_char == 'M');
                                 if (b == 0 || b == 32)
                                         term_mouse.left = down;
@@ -166,7 +226,11 @@ void ui_begin(void)
                 ch = term_height;
         }
         for (int i = 0; i < cw * ch; i++)
-                canvas[i] = (Cell){' ', {255, 255, 255}, {0, 0, 0}};
+        {
+                strcpy(canvas[i].ch, " ");
+                canvas[i].fg = (Color){255, 255, 255};
+                canvas[i].bg = (Color){0, 0, 0};
+        }
 }
 
 void ui_rect(int x, int y, int w, int h, Color bg)
@@ -174,7 +238,11 @@ void ui_rect(int x, int y, int w, int h, Color bg)
         for (int r = y; r < y + h; r++)
                 for (int c = x; c < x + w; c++)
                         if (c >= 0 && c < term_width && r >= 0 && r < term_height)
-                                canvas[r * term_width + c] = (Cell){' ', canvas[r * term_width + c].fg, bg};
+                        {
+                                int idx = r * term_width + c;
+                                strcpy(canvas[idx].ch, " ");
+                                canvas[idx].bg = bg;
+                        }
 }
 
 void ui_text(int x, int y, const char *txt, Color fg, Color bg)
@@ -183,7 +251,13 @@ void ui_text(int x, int y, const char *txt, Color fg, Color bg)
                 return;
         for (int i = 0; txt[i]; i++)
                 if (x + i >= 0 && x + i < term_width)
-                        canvas[y * term_width + x + i] = (Cell){txt[i], fg, bg};
+                {
+                        int idx = y * term_width + x + i;
+                        canvas[idx].ch[0] = txt[i];
+                        canvas[idx].ch[1] = '\0';
+                        canvas[idx].fg = fg;
+                        canvas[idx].bg = bg;
+                }
 }
 
 void ui_cursor(void)
@@ -191,8 +265,21 @@ void ui_cursor(void)
         if (term_mouse.x >= 0 && term_mouse.x < term_width && term_mouse.y >= 0 && term_mouse.y < term_height)
         {
                 Color cc = term_mouse.left ? (Color){0, 255, 0} : (term_mouse.right ? (Color){255, 0, 0} : (Color){255, 255, 0});
-                canvas[term_mouse.y * term_width + term_mouse.x].ch = 'X';
-                canvas[term_mouse.y * term_width + term_mouse.x].fg = cc;
+                int idx = term_mouse.y * term_width + term_mouse.x;
+
+                if (term_mouse.has_sub)
+                {
+                        if (term_mouse.sub_y == 0)
+                                strcpy(canvas[idx].ch, "\xe2\x96\x80"); // ▀ Top
+                        else
+                                strcpy(canvas[idx].ch, "\xe2\x96\x84"); // ▄ Bottom
+                }
+                else
+                {
+                        strcpy(canvas[idx].ch, "\xe2\x96\xa0"); // ■ Solid Block Fallback
+                }
+
+                canvas[idx].fg = cc;
         }
 }
 
@@ -207,22 +294,27 @@ void ui_end(void)
                         Cell c = canvas[y * term_width + x];
                         if (!col_eq(c.bg, lbg))
                         {
-                                if (tc)
+                                if (color_mode == 2)
                                         printf("\x1b[48;2;%d;%d;%dm", c.bg.r, c.bg.g, c.bg.b);
-                                else
+                                else if (color_mode == 1)
                                         printf("\x1b[48;5;%dm", rgb256(c.bg));
+                                else
+                                        printf("\x1b[%dm", rgb_to_ansi16(c.bg, true));
                                 lbg = c.bg;
                         }
                         if (!col_eq(c.fg, lfg))
                         {
-                                if (tc)
+                                if (color_mode == 2)
                                         printf("\x1b[38;2;%d;%d;%dm", c.fg.r, c.fg.g, c.fg.b);
-                                else
+                                else if (color_mode == 1)
                                         printf("\x1b[38;5;%dm", rgb256(c.fg));
+                                else
+                                        printf("\x1b[%dm", rgb_to_ansi16(c.fg, false));
                                 lfg = c.fg;
                         }
-                        putchar(c.ch);
+                        fputs(c.ch, stdout);
                 }
         }
+        printf("\x1b[0m");
         fflush(stdout);
 }
