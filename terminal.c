@@ -7,6 +7,7 @@
 #include <sys/ioctl.h>
 #include <string.h>
 #include <signal.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <stdbool.h>
 
@@ -44,6 +45,7 @@ int term_width, term_height;
 static struct termios orig_termios;
 static volatile int resize_flag = 1;
 static Cell *canvas;
+static int fd_m = -1, raw_mx, raw_my;
 static int color_mode = 0;
 static char out_buf[1024 * 1024];
 
@@ -91,6 +93,8 @@ void term_restore(void)
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
         printf("\x1b[0m\x1b[2J\x1b[H\x1b[?25h\x1b[?1006l\x1b[?1015l\x1b[?1003l");
         fflush(stdout);
+        if (fd_m >= 0)
+                close(fd_m);
         if (canvas)
                 free(canvas);
 }
@@ -128,6 +132,9 @@ int term_init(void)
                 color_mode = 0;
         }
 
+        // Restore raw Linux mouse fallback for TTYs!
+        fd_m = open("/dev/input/mice", O_RDONLY | O_NONBLOCK);
+
         setvbuf(stdout, out_buf, _IOFBF, sizeof(out_buf));
         printf("\x1b[?25l\x1b[?1003h\x1b[?1015h\x1b[?1006h");
         signal(SIGWINCH, on_resize);
@@ -136,8 +143,8 @@ int term_init(void)
 
 int term_poll(int timeout_ms)
 {
-        struct pollfd fds[1] = {{STDIN_FILENO, POLLIN, 0}};
-        poll(fds, 1, timeout_ms);
+        struct pollfd fds[2] = {{STDIN_FILENO, POLLIN, 0}, {fd_m, POLLIN, 0}};
+        poll(fds, fd_m >= 0 ? 2 : 1, timeout_ms);
 
         if (resize_flag)
         {
@@ -152,6 +159,32 @@ int term_poll(int timeout_ms)
         term_mouse.wheel = 0;
         int key = 0;
 
+        // Raw Linux Mouse reading
+        if (fd_m >= 0)
+        {
+                unsigned char m[3];
+                while (read(fd_m, m, 3) == 3)
+                {
+                        term_mouse.left = m[0] & 1;
+                        term_mouse.right = m[0] & 2;
+                        raw_mx += (signed char)m[1];
+                        raw_my -= (signed char)m[2];
+                        if (raw_mx < 0)
+                                raw_mx = 0;
+                        else if (raw_mx >= term_width * 8)
+                                raw_mx = term_width * 8 - 1;
+                        if (raw_my < 0)
+                                raw_my = 0;
+                        else if (raw_my >= term_height * 16)
+                                raw_my = term_height * 16 - 1;
+
+                        term_mouse.x = raw_mx / 8;
+                        term_mouse.y = raw_my / 16;
+                        term_mouse.sub_y = (raw_my / 8) % 2;
+                        term_mouse.has_sub = true;
+                }
+        }
+
         char buf[64];
         int n = read(STDIN_FILENO, buf, sizeof(buf));
         int i = 0;
@@ -159,7 +192,6 @@ int term_poll(int timeout_ms)
         {
                 if (buf[i] == '\x1b')
                 {
-                        // Handle standalone Escape key
                         if (i + 1 >= n || buf[i + 1] != '[')
                         {
                                 key = KEY_ESC;
@@ -167,7 +199,6 @@ int term_poll(int timeout_ms)
                                 continue;
                         }
 
-                        // SGR 1006 (Modern)
                         if (i + 2 < n && buf[i + 2] == '<')
                         {
                                 int b, x, y, offset = 0;
@@ -191,7 +222,6 @@ int term_poll(int timeout_ms)
                                         continue;
                                 }
                         }
-                        // Legacy X10/X11 Mouse Fallback
                         else if (i + 2 < n && buf[i + 2] == 'M' && i + 5 < n)
                         {
                                 int b = (unsigned char)buf[i + 3] - 32;
@@ -219,7 +249,6 @@ int term_poll(int timeout_ms)
                                 i += 6;
                                 continue;
                         }
-                        // Keyboard Arrow Keys
                         else if (i + 2 < n && buf[i + 2] == 'A')
                         {
                                 key = KEY_UP;
@@ -302,7 +331,6 @@ void ui_text(int x, int y, const char *txt, Color fg, Color bg)
 
         while (txt[i] && screen_x < term_width)
         {
-                // Basic UTF-8 Decoding length logic
                 int char_len = 1;
                 if ((txt[i] & 0xE0) == 0xC0)
                         char_len = 2;
@@ -346,7 +374,6 @@ void ui_cursor(void)
                 {
                         strcpy(canvas[idx].ch, "\xe2\x96\xa0");
                 }
-
                 canvas[idx].fg = cc;
         }
 }

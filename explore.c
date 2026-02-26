@@ -15,7 +15,6 @@ typedef struct
         bool is_dir;
 } FileEntry;
 
-// Dynamic array state
 FileEntry *entries = NULL;
 int entry_capacity = 0;
 int entry_count = 0;
@@ -56,7 +55,6 @@ void load_dir(const char *path)
                 if (!strcmp(dir->d_name, "."))
                         continue;
 
-                // Dynamically grow the array via orelse to catch out-of-memory gracefully
                 if (entry_count >= entry_capacity)
                 {
                         entry_capacity = entry_capacity == 0 ? 256 : entry_capacity * 2;
@@ -78,7 +76,7 @@ int main(void)
 {
         term_init() orelse return 1;
         defer term_restore();
-        defer free(entries); // Cleanup the global array perfectly using Prism
+        defer free(entries);
 
         load_dir(".");
 
@@ -91,15 +89,18 @@ int main(void)
                         diff = -diff;
                 bool is_animating = !dragging_scroll && (diff > 0.01f);
 
-                // Use 0 timeout on the first frame so it rushes down to render the UI!
-                int timeout = -1;
-                if (is_animating)
+                // Base minimal 1 FPS (1000ms), override to 60 FPS (16ms) if active
+                int timeout = 1000;
+                if (is_animating || dragging_scroll)
                         timeout = 16;
+
                 if (first_frame)
+                {
                         timeout = 0;
+                        first_frame = false;
+                }
 
                 int key = term_poll(timeout);
-                first_frame = false;
 
                 int cell_w = 14;
                 int cell_h = 6;
@@ -112,7 +113,6 @@ int main(void)
                 int track_y = list_start_y;
                 int track_h = term_height - 1 - list_start_y;
 
-                // Input Handling
                 if (key == 'q' || key == KEY_ESC)
                         break;
                 if (key == 'j')
@@ -120,7 +120,6 @@ int main(void)
                 if (key == 'k')
                         term_mouse.wheel -= 1;
 
-                // Grid Keyboard Navigation
                 bool selection_changed = false;
                 if (key == KEY_RIGHT && selected_idx < entry_count - 1)
                 {
@@ -143,14 +142,12 @@ int main(void)
                         selection_changed = true;
                 }
 
-                // Keyboard Enter-to-Open
                 if (key == KEY_ENTER && entry_count > 0 && entries[selected_idx].is_dir)
                 {
                         load_dir(entries[selected_idx].name);
                         continue;
                 }
 
-                // Auto-Scroll Camera Tracking
                 int scroll_offset = (int)current_scroll;
                 if (selection_changed && entry_count > 0)
                 {
@@ -163,34 +160,32 @@ int main(void)
                                 target_scroll += (sel_y + cell_h - (term_height - 1));
                 }
 
-                // Scroll Boundaries Math
                 int max_scroll_lines = (rows * cell_h) - track_h;
                 if (max_scroll_lines < 0)
                         max_scroll_lines = 0;
 
-                // Handle Scrollbar Dragging
                 if (term_mouse.clicked && term_mouse.x == term_width - 1 && term_mouse.y >= track_y && term_mouse.y < track_y + track_h)
                 {
                         dragging_scroll = true;
                 }
                 if (!term_mouse.left)
+                {
                         dragging_scroll = false;
+                }
 
                 if (dragging_scroll && max_scroll_lines > 0)
                 {
                         float click_ratio = (float)(term_mouse.y - track_y) / (float)track_h;
                         target_scroll = click_ratio * max_scroll_lines;
-                        current_scroll = target_scroll; // Instant snap for 1:1 mouse tracking
+                        current_scroll = target_scroll;
                 }
 
-                // Standard scrolling
                 target_scroll += term_mouse.wheel * 4.0f;
                 if (target_scroll > max_scroll_lines)
                         target_scroll = max_scroll_lines;
                 if (target_scroll < 0)
                         target_scroll = 0;
 
-                // Only smooth lerp if we aren't actively dragging
                 if (!dragging_scroll)
                 {
                         current_scroll += (target_scroll - current_scroll) * 0.3f;
@@ -200,7 +195,6 @@ int main(void)
                 ui_begin();
                 ui_rect(0, 0, term_width, term_height, clr_bg);
 
-                // Draw Grid
                 for (int i = 0; i < entry_count; i++)
                 {
                         int r = (i / cols);
@@ -262,7 +256,6 @@ int main(void)
                                 selected_idx = i;
                 }
 
-                // Draw Scrollbar
                 if (max_scroll_lines > 0)
                 {
                         ui_rect(term_width - 1, track_y, 1, track_h, (Color){30, 30, 30});
@@ -281,7 +274,6 @@ int main(void)
                         ui_rect(term_width - 1, thumb_y, 1, thumb_h, thumb_clr);
                 }
 
-                // Draw UI Bars LAST (Z-Order Trick)
                 ui_rect(0, 0, term_width, list_start_y, clr_bg);
                 ui_rect(0, 0, term_width, 1, clr_bar);
 
