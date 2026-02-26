@@ -89,7 +89,6 @@ int main(void)
                         diff = -diff;
                 bool is_animating = !dragging_scroll && (diff > 0.01f);
 
-                // Base minimal 1 FPS (1000ms), override to 60 FPS (16ms) if active
                 int timeout = 1000;
                 if (is_animating || dragging_scroll)
                         timeout = 16;
@@ -160,9 +159,17 @@ int main(void)
                                 target_scroll += (sel_y + cell_h - (term_height - 1));
                 }
 
+                // Calculate geometry BEFORE handling scroll events
                 int max_scroll_lines = (rows * cell_h) - track_h;
                 if (max_scroll_lines < 0)
                         max_scroll_lines = 0;
+
+                float visible_ratio = (float)track_h / (float)(rows * cell_h);
+                if (visible_ratio > 1.0f)
+                        visible_ratio = 1.0f;
+                int thumb_h = (int)(track_h * visible_ratio);
+                if (thumb_h < 1)
+                        thumb_h = 1;
 
                 if (term_mouse.clicked && term_mouse.x == term_width - 1 && term_mouse.y >= track_y && term_mouse.y < track_y + track_h)
                 {
@@ -175,12 +182,22 @@ int main(void)
 
                 if (dragging_scroll && max_scroll_lines > 0)
                 {
-                        float click_ratio = (float)(term_mouse.y - track_y) / (float)track_h;
+                        int scrollable_track = track_h - thumb_h;
+                        if (scrollable_track <= 0)
+                                scrollable_track = 1;
+
+                        // Map directly to the scrollable gap, offset to grab the thumb's center
+                        float click_ratio = (float)(term_mouse.y - track_y - (thumb_h / 2)) / (float)scrollable_track;
+                        if (click_ratio < 0.0f)
+                                click_ratio = 0.0f;
+                        if (click_ratio > 1.0f)
+                                click_ratio = 1.0f;
+
                         target_scroll = click_ratio * max_scroll_lines;
                         current_scroll = target_scroll;
                 }
 
-                target_scroll += term_mouse.wheel * 4.0f;
+                target_scroll += term_mouse.wheel * 12.0f;
                 if (target_scroll > max_scroll_lines)
                         target_scroll = max_scroll_lines;
                 if (target_scroll < 0)
@@ -222,19 +239,18 @@ int main(void)
 
                         if (entries[i].is_dir)
                         {
-                                ui_text(screen_x + 3, screen_y + 0, " .---.__", icon_fg, item_bg);
-                                ui_text(screen_x + 3, screen_y + 1, " |   |  |", icon_fg, item_bg);
-                                ui_text(screen_x + 3, screen_y + 2, " |   |  |", icon_fg, item_bg);
-                                ui_text(screen_x + 3, screen_y + 3, " !---|__|", icon_fg, item_bg);
+                                ui_text(screen_x + 2, screen_y + 0, " ╭──╮___ ", icon_fg, item_bg);
+                                ui_text(screen_x + 2, screen_y + 1, " │  ╰───│ ", icon_fg, item_bg);
+                                ui_text(screen_x + 2, screen_y + 2, " │      │ ", icon_fg, item_bg);
+                                ui_text(screen_x + 2, screen_y + 3, " ╰──────╯ ", icon_fg, item_bg);
                         }
                         else
                         {
-                                ui_text(screen_x + 3, screen_y + 0, "  .- \\", icon_fg, item_bg);
-                                ui_text(screen_x + 3, screen_y + 1, "  |   \\", icon_fg, item_bg);
-                                ui_text(screen_x + 3, screen_y + 2, "  |   |", icon_fg, item_bg);
-                                ui_text(screen_x + 3, screen_y + 3, "  `---`", icon_fg, item_bg);
+                                ui_text(screen_x + 2, screen_y + 0, "  ╭──╮_ ", icon_fg, item_bg);
+                                ui_text(screen_x + 2, screen_y + 1, "  │  ╰─│", icon_fg, item_bg);
+                                ui_text(screen_x + 2, screen_y + 2, "  │    │", icon_fg, item_bg);
+                                ui_text(screen_x + 2, screen_y + 3, "  ╰────╯", icon_fg, item_bg);
                         }
-
                         char name_buf[16];
                         strncpy(name_buf, entries[i].name, cell_w - 2);
                         if (strlen(entries[i].name) > cell_w - 2)
@@ -259,13 +275,6 @@ int main(void)
                 if (max_scroll_lines > 0)
                 {
                         ui_rect(term_width - 1, track_y, 1, track_h, (Color){30, 30, 30});
-
-                        float visible_ratio = (float)track_h / (float)(rows * cell_h);
-                        if (visible_ratio > 1.0f)
-                                visible_ratio = 1.0f;
-                        int thumb_h = (int)(track_h * visible_ratio);
-                        if (thumb_h < 1)
-                                thumb_h = 1;
 
                         float scroll_ratio = current_scroll / (float)max_scroll_lines;
                         int thumb_y = track_y + (int)(scroll_ratio * (track_h - thumb_h));

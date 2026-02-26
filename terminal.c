@@ -11,6 +11,10 @@
 #include <poll.h>
 #include <stdbool.h>
 
+#ifdef __linux__
+#include <linux/input.h>
+#endif
+
 // Extended Key Codes for Keyboard Navigation
 #define KEY_UP 1000
 #define KEY_DOWN 1001
@@ -46,6 +50,7 @@ static struct termios orig_termios;
 static volatile int resize_flag = 1;
 static Cell *canvas;
 static int fd_m = -1, raw_mx, raw_my;
+static bool is_evdev = false;
 static int color_mode = 0;
 static char out_buf[1024 * 1024];
 
@@ -132,8 +137,35 @@ int term_init(void)
                 color_mode = 0;
         }
 
-        // Restore raw Linux mouse fallback for TTYs!
-        fd_m = open("/dev/input/mice", O_RDONLY | O_NONBLOCK);
+#ifdef __linux__
+        // Hunt for the modern evdev mouse so we can get Wheel data on raw TTY
+        for (int i = 0; i < 32; i++)
+        {
+                char path[64];
+                snprintf(path, sizeof(path), "/dev/input/event%d", i);
+                int fd = open(path, O_RDONLY | O_NONBLOCK);
+                if (fd >= 0)
+                {
+                        unsigned long ev_bits[EV_MAX / 8 + 1] = {0};
+                        unsigned long rel_bits[REL_MAX / 8 + 1] = {0};
+                        ioctl(fd, EVIOCGBIT(0, sizeof(ev_bits)), ev_bits);
+                        ioctl(fd, EVIOCGBIT(EV_REL, sizeof(rel_bits)), rel_bits);
+
+                        if ((ev_bits[EV_REL / 8] & (1 << (EV_REL % 8))) &&
+                            (rel_bits[REL_X / 8] & (1 << (REL_X % 8))) &&
+                            (rel_bits[REL_Y / 8] & (1 << (REL_Y % 8))))
+                        {
+                                fd_m = fd;
+                                is_evdev = true;
+                                break;
+                        }
+                        close(fd);
+                }
+        }
+#endif
+        // Fallback to legacy mouse
+        if (fd_m < 0)
+                fd_m = open("/dev/input/mice", O_RDONLY | O_NONBLOCK);
 
         setvbuf(stdout, out_buf, _IOFBF, sizeof(out_buf));
         printf("\x1b[?25l\x1b[?1003h\x1b[?1015h\x1b[?1006h");
@@ -162,27 +194,56 @@ int term_poll(int timeout_ms)
         // Raw Linux Mouse reading
         if (fd_m >= 0)
         {
-                unsigned char m[3];
-                while (read(fd_m, m, 3) == 3)
+#ifdef __linux__
+                if (is_evdev)
                 {
-                        term_mouse.left = m[0] & 1;
-                        term_mouse.right = m[0] & 2;
-                        raw_mx += (signed char)m[1];
-                        raw_my -= (signed char)m[2];
-                        if (raw_mx < 0)
-                                raw_mx = 0;
-                        else if (raw_mx >= term_width * 8)
-                                raw_mx = term_width * 8 - 1;
-                        if (raw_my < 0)
-                                raw_my = 0;
-                        else if (raw_my >= term_height * 16)
-                                raw_my = term_height * 16 - 1;
-
-                        term_mouse.x = raw_mx / 8;
-                        term_mouse.y = raw_my / 16;
-                        term_mouse.sub_y = (raw_my / 8) % 2;
-                        term_mouse.has_sub = true;
+                        struct input_event ev;
+                        while (read(fd_m, &ev, sizeof(ev)) == sizeof(ev))
+                        {
+                                if (ev.type == EV_REL)
+                                {
+                                        if (ev.code == REL_X)
+                                                raw_mx += ev.value;
+                                        if (ev.code == REL_Y)
+                                                raw_my += ev.value;
+                                        if (ev.code == REL_WHEEL)
+                                                term_mouse.wheel -= ev.value;
+                                }
+                                else if (ev.type == EV_KEY)
+                                {
+                                        if (ev.code == BTN_LEFT)
+                                                term_mouse.left = ev.value;
+                                        if (ev.code == BTN_RIGHT)
+                                                term_mouse.right = ev.value;
+                                }
+                        }
                 }
+                else
+#endif
+                {
+                        unsigned char m[3];
+                        while (read(fd_m, m, 3) == 3)
+                        {
+                                term_mouse.left = m[0] & 1;
+                                term_mouse.right = m[0] & 2;
+                                raw_mx += (signed char)m[1];
+                                raw_my -= (signed char)m[2];
+                        }
+                }
+
+                if (raw_mx < 0)
+                        raw_mx = 0;
+                else if (raw_mx >= term_width * 8)
+                        raw_mx = term_width * 8 - 1;
+                if (raw_my < 0)
+                        raw_my = 0;
+                else if (raw_my >= term_height * 16)
+                        raw_my = term_height * 16 - 1;
+
+                term_mouse.x = raw_mx / 8;
+                term_mouse.y = raw_my / 16;
+                term_mouse.sub_y = (raw_my / 8) % 2;
+                term_mouse.has_sub = true;
         }
 
         char buf[64];
