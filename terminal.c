@@ -11,6 +11,13 @@
 #include <poll.h>
 #include <stdbool.h>
 
+// Extended Key Codes for Keyboard Navigation
+#define KEY_UP 1000
+#define KEY_DOWN 1001
+#define KEY_RIGHT 1002
+#define KEY_LEFT 1003
+#define KEY_ENTER 10
+
 typedef struct
 {
         int r, g, b;
@@ -132,7 +139,7 @@ int term_init(void)
         return 1;
 }
 
-char term_poll(int timeout_ms)
+int term_poll(int timeout_ms)
 {
         struct pollfd fds[2] = {{STDIN_FILENO, POLLIN, 0}, {fd_m, POLLIN, 0}};
         poll(fds, fd_m >= 0 ? 2 : 1, timeout_ms);
@@ -148,9 +155,9 @@ char term_poll(int timeout_ms)
 
         bool last_left = term_mouse.left;
         term_mouse.wheel = 0;
-        char key = 0;
+        int key = 0;
 
-        // Raw Linux Mouse (No wheel data natively)
+        // Raw Linux Mouse reading
         if (fd_m >= 0)
         {
                 unsigned char m[3];
@@ -176,7 +183,7 @@ char term_poll(int timeout_ms)
                 }
         }
 
-        // ANSI Escape Sequence Parser
+        // Dual ANSI Escape Sequence Parser (SGR 1006 + Legacy X11)
         char buf[64];
         int n = read(STDIN_FILENO, buf, sizeof(buf));
         int i = 0;
@@ -184,7 +191,7 @@ char term_poll(int timeout_ms)
         {
                 if (buf[i] == '\x1b' && i + 2 < n && buf[i + 1] == '[')
                 {
-                        // Match Mouse Events
+                        // SGR 1006 (Modern)
                         if (buf[i + 2] == '<')
                         {
                                 int b, x, y, offset = 0;
@@ -193,8 +200,6 @@ char term_poll(int timeout_ms)
                                 {
                                         term_mouse.x = x - 1;
                                         term_mouse.y = y - 1;
-                                        raw_mx = term_mouse.x * 8;
-                                        raw_my = term_mouse.y * 16;
                                         term_mouse.has_sub = false;
 
                                         bool down = (m_char == 'M');
@@ -203,30 +208,74 @@ char term_poll(int timeout_ms)
                                         if (b == 2 || b == 34)
                                                 term_mouse.right = down;
                                         if (b == 64 && down)
-                                                term_mouse.wheel -= 1; // Accumulate scroll
+                                                term_mouse.wheel -= 1;
                                         if (b == 65 && down)
                                                 term_mouse.wheel += 1;
                                         i += 3 + offset;
                                         continue;
                                 }
                         }
-                        // Match ANSI Arrow Keys (Spoofing the mouse wheel)
+                        // Legacy X10/X11 Mouse Fallback
+                        else if (buf[i + 2] == 'M' && i + 5 < n)
+                        {
+                                int b = (unsigned char)buf[i + 3] - 32;
+                                int x = (unsigned char)buf[i + 4] - 32;
+                                int y = (unsigned char)buf[i + 5] - 32;
+
+                                term_mouse.x = x - 1;
+                                term_mouse.y = y - 1;
+                                term_mouse.has_sub = false;
+
+                                if (b == 0 || b == 32)
+                                        term_mouse.left = true;
+                                else if (b == 2 || b == 34)
+                                        term_mouse.right = true;
+                                else if (b == 3 || b == 35)
+                                {
+                                        term_mouse.left = false;
+                                        term_mouse.right = false;
+                                }
+                                else if (b == 64)
+                                        term_mouse.wheel -= 1;
+                                else if (b == 65)
+                                        term_mouse.wheel += 1;
+
+                                i += 6;
+                                continue;
+                        }
+                        // Keyboard Arrow Keys
                         else if (buf[i + 2] == 'A')
                         {
-                                term_mouse.wheel -= 1;
+                                key = KEY_UP;
                                 i += 3;
                                 continue;
-                        } // Up Arrow
+                        }
                         else if (buf[i + 2] == 'B')
                         {
-                                term_mouse.wheel += 1;
+                                key = KEY_DOWN;
                                 i += 3;
                                 continue;
-                        } // Down Arrow
+                        }
+                        else if (buf[i + 2] == 'C')
+                        {
+                                key = KEY_RIGHT;
+                                i += 3;
+                                continue;
+                        }
+                        else if (buf[i + 2] == 'D')
+                        {
+                                key = KEY_LEFT;
+                                i += 3;
+                                continue;
+                        }
                 }
 
                 if (!key)
+                {
                         key = buf[i];
+                        if (key == '\r')
+                                key = KEY_ENTER;
+                }
                 i++;
         }
 
