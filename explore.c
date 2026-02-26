@@ -81,6 +81,7 @@ int main(void)
         load_dir(".");
 
         bool first_frame = true;
+        char next_dir[PATH_MAX] = {0};
 
         while (1)
         {
@@ -143,8 +144,7 @@ int main(void)
 
                 if (key == KEY_ENTER && entry_count > 0 && entries[selected_idx].is_dir)
                 {
-                        load_dir(entries[selected_idx].name);
-                        continue;
+                        strncpy(next_dir, entries[selected_idx].name, sizeof(next_dir) - 1);
                 }
 
                 int scroll_offset = (int)current_scroll;
@@ -239,17 +239,17 @@ int main(void)
 
                         if (entries[i].is_dir)
                         {
-                                ui_text(screen_x + 2, screen_y + 0, " ╭──╮___ ", icon_fg, item_bg);
-                                ui_text(screen_x + 2, screen_y + 1, " │  ╰───│ ", icon_fg, item_bg);
+                                ui_text(screen_x + 2, screen_y + 0, " ┌──┐___ ", icon_fg, item_bg);
+                                ui_text(screen_x + 2, screen_y + 1, " │  └───│ ", icon_fg, item_bg);
                                 ui_text(screen_x + 2, screen_y + 2, " │      │ ", icon_fg, item_bg);
-                                ui_text(screen_x + 2, screen_y + 3, " ╰──────╯ ", icon_fg, item_bg);
+                                ui_text(screen_x + 2, screen_y + 3, " └──────┘ ", icon_fg, item_bg);
                         }
                         else
                         {
-                                ui_text(screen_x + 2, screen_y + 0, "  ╭──╮_ ", icon_fg, item_bg);
-                                ui_text(screen_x + 2, screen_y + 1, "  │  ╰─│", icon_fg, item_bg);
+                                ui_text(screen_x + 2, screen_y + 0, "  ┌──┐_ ", icon_fg, item_bg);
+                                ui_text(screen_x + 2, screen_y + 1, "  │  └─│", icon_fg, item_bg);
                                 ui_text(screen_x + 2, screen_y + 2, "  │    │", icon_fg, item_bg);
-                                ui_text(screen_x + 2, screen_y + 3, "  ╰────╯", icon_fg, item_bg);
+                                ui_text(screen_x + 2, screen_y + 3, "  └────┘", icon_fg, item_bg);
                         }
                         char name_buf[16];
                         strncpy(name_buf, entries[i].name, cell_w - 2);
@@ -262,14 +262,14 @@ int main(void)
                         int pad = (cell_w - strlen(name_buf)) / 2;
                         ui_text(screen_x + pad, screen_y + 4, name_buf, clr_text, item_bg);
 
-                        if (hovered && term_mouse.clicked && entries[i].is_dir)
-                        {
-                                load_dir(entries[i].name);
-                                break;
-                        }
-
                         if (hovered && term_mouse.clicked)
+                        {
                                 selected_idx = i;
+                                if (entries[i].is_dir)
+                                {
+                                        strncpy(next_dir, entries[i].name, sizeof(next_dir) - 1);
+                                }
+                        }
                 }
 
                 if (max_scroll_lines > 0)
@@ -295,6 +295,13 @@ int main(void)
 
                 ui_cursor();
                 ui_end();
+
+                if (next_dir[0] != '\0')
+                {
+                        load_dir(next_dir);
+                        next_dir[0] = '\0';
+                        first_frame = true;
+                }
         }
 
         return 0;
