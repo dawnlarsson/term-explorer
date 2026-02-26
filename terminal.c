@@ -22,6 +22,7 @@
 #define KEY_LEFT 1003
 #define KEY_ENTER 10
 #define KEY_ESC 27
+#define KEY_BACKSPACE 127 // Added Backspace
 
 typedef struct
 {
@@ -341,6 +342,9 @@ int term_poll(int timeout_ms)
                         key = buf[i];
                         if (key == '\r')
                                 key = KEY_ENTER;
+                        // Map both possible backspace values (DEL and BS)
+                        if (key == 127 || key == 8)
+                                key = KEY_BACKSPACE;
                 }
                 i++;
         }
@@ -356,9 +360,8 @@ void ui_begin(void)
         {
                 if (canvas)
                         free(canvas);
-                canvas = malloc(term_width * term_height * sizeof(Cell));
-                if (!canvas)
-                        exit(1);
+                // Prism in action: orelse on malloc
+                canvas = malloc(term_width * term_height * sizeof(Cell)) orelse exit(1);
                 cw = term_width;
                 ch = term_height;
         }

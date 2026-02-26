@@ -58,13 +58,15 @@ void load_dir(const char *path)
                 if (entry_count >= entry_capacity)
                 {
                         entry_capacity = entry_capacity == 0 ? 256 : entry_capacity * 2;
-                        entries = realloc(entries, entry_capacity * sizeof(FileEntry)) orelse return;
+                        void *new_entries = realloc(entries, entry_capacity * sizeof(FileEntry)) orelse return;
+                        entries = new_entries;
                 }
 
                 struct stat st;
                 stat(dir->d_name, &st);
 
                 strncpy(entries[entry_count].name, dir->d_name, 255);
+                entries[entry_count].name[255] = '\0'; // Guarantee termination
                 entries[entry_count].is_dir = S_ISDIR(st.st_mode);
                 entry_count++;
         }
@@ -110,8 +112,11 @@ int main(void)
 
                 int rows = (entry_count + cols - 1) / cols;
                 int list_start_y = 2;
+
                 int track_y = list_start_y;
                 int track_h = term_height - 1 - list_start_y;
+                if (track_h < 1)
+                        track_h = 1; // Prevent zero/negative track height
 
                 if (key == 'q' || key == KEY_ESC)
                         break;
@@ -119,6 +124,11 @@ int main(void)
                         term_mouse.wheel += 1;
                 if (key == 'k')
                         term_mouse.wheel -= 1;
+                if (key == KEY_BACKSPACE)
+                {
+                        strncpy(next_dir, "..", sizeof(next_dir) - 1);
+                        next_dir[sizeof(next_dir) - 1] = '\0';
+                }
 
                 bool selection_changed = false;
                 if (key == KEY_RIGHT && selected_idx < entry_count - 1)
@@ -145,6 +155,7 @@ int main(void)
                 if (key == KEY_ENTER && entry_count > 0 && entries[selected_idx].is_dir)
                 {
                         strncpy(next_dir, entries[selected_idx].name, sizeof(next_dir) - 1);
+                        next_dir[sizeof(next_dir) - 1] = '\0'; // Guarantee termination
                 }
 
                 int scroll_offset = (int)current_scroll;
@@ -253,6 +264,8 @@ int main(void)
                         }
                         char name_buf[16];
                         strncpy(name_buf, entries[i].name, cell_w - 2);
+                        name_buf[cell_w - 2] = '\0';
+
                         if (strlen(entries[i].name) > cell_w - 2)
                         {
                                 name_buf[cell_w - 4] = '.';
@@ -268,6 +281,7 @@ int main(void)
                                 if (entries[i].is_dir)
                                 {
                                         strncpy(next_dir, entries[i].name, sizeof(next_dir) - 1);
+                                        next_dir[sizeof(next_dir) - 1] = '\0';
                                 }
                         }
                 }
@@ -291,7 +305,7 @@ int main(void)
                 ui_text(1, 0, header, (Color){0, 0, 0}, clr_bar);
 
                 ui_rect(0, term_height - 1, term_width, 1, clr_bar);
-                ui_text(1, term_height - 1, " Arrows: Navigate | Enter/Double-Click: Open | 'q'/ESC: Quit ", (Color){0, 0, 0}, clr_bar);
+                ui_text(1, term_height - 1, " Arrows: Navigate | Click/Enter: Open | Backspace: Up | 'q'/ESC: Quit ", (Color){0, 0, 0}, clr_bar);
 
                 ui_cursor();
                 ui_end();
