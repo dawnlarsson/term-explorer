@@ -59,7 +59,7 @@ static void on_resize(int s) { resize_flag = 1; }
 static void on_sigint(int s)
 {
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
-        printf("\x1b[0m\x1b[2J\x1b[H\x1b[?25h\x1b[?1006l\x1b[?1015l\x1b[?1003l");
+        printf("\x1b%%@\x1b[0m\x1b[2J\x1b[H\x1b[?25h\x1b[?7h\x1b[?1006l\x1b[?1015l\x1b[?1003l");
         fflush(stdout);
         _exit(1);
 }
@@ -96,7 +96,7 @@ static int rgb_to_ansi16(Color c, bool is_bg)
 void term_restore(void)
 {
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
-        printf("\x1b[0m\x1b[2J\x1b[H\x1b[?25h\x1b[?1006l\x1b[?1015l\x1b[?1003l");
+        printf("\x1b%%@\x1b[0m\x1b[2J\x1b[H\x1b[?25h\x1b[?7h\x1b[?1006l\x1b[?1015l\x1b[?1003l");
         fflush(stdout);
         if (fd_m >= 0)
                 close(fd_m);
@@ -168,7 +168,7 @@ int term_init(void)
                 fd_m = open("/dev/input/mice", O_RDONLY | O_NONBLOCK);
 
         setvbuf(stdout, out_buf, _IOFBF, sizeof(out_buf));
-        printf("\x1b[?25l\x1b[?1003h\x1b[?1015h\x1b[?1006h");
+        printf("\x1b%%G\x1b[?25l\x1b[?7l\x1b[?1003h\x1b[?1015h\x1b[?1006h");
         signal(SIGWINCH, on_resize);
         return 1;
 }
