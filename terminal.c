@@ -360,8 +360,10 @@ void ui_begin(void)
         {
                 if (canvas)
                         free(canvas);
-                // Prism in action: orelse on malloc
-                canvas = malloc(term_width * term_height * sizeof(Cell)) orelse exit(1);
+
+                Cell *new_canvas = malloc(term_width * term_height * sizeof(Cell)) orelse { exit(1); };
+                canvas = new_canvas;
+
                 cw = term_width;
                 ch = term_height;
         }
