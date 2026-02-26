@@ -32,6 +32,8 @@ typedef struct
 {
         char ch[5];
         Color fg, bg;
+        bool bold;
+        bool invert;
 } Cell;
 typedef struct
 {
@@ -377,6 +379,8 @@ void ui_begin(void)
                 strcpy(canvas[i].ch, " ");
                 canvas[i].fg = (Color){255, 255, 255};
                 canvas[i].bg = (Color){0, 0, 0};
+                canvas[i].bold = false;
+                canvas[i].invert = false;
         }
 }
 
@@ -389,10 +393,12 @@ void ui_rect(int x, int y, int w, int h, Color bg)
                                 int idx = r * term_width + c;
                                 strcpy(canvas[idx].ch, " ");
                                 canvas[idx].bg = bg;
+                                canvas[idx].bold = false;
+                                canvas[idx].invert = false;
                         }
 }
 
-void ui_text(int x, int y, const char *txt, Color fg, Color bg)
+void ui_text(int x, int y, const char *txt, Color fg, Color bg, bool bold, bool invert)
 {
         if (y < 0 || y >= term_height)
                 return;
@@ -421,6 +427,8 @@ void ui_text(int x, int y, const char *txt, Color fg, Color bg)
                         canvas[idx].ch[j] = '\0';
                         canvas[idx].fg = fg;
                         canvas[idx].bg = bg;
+                        canvas[idx].bold = bold;
+                        canvas[idx].invert = invert;
                 }
                 i += char_len;
                 screen_x++;
@@ -452,12 +460,25 @@ void ui_cursor(void)
 void ui_end(void)
 {
         Color lfg = {-1, -1, -1}, lbg = {-1, -1, -1};
+        bool lbold = false, linvert = false;
+
         for (int y = 0; y < term_height; y++)
         {
                 printf("\x1b[%d;1H", y + 1);
                 for (int x = 0; x < term_width; x++)
                 {
                         Cell c = canvas[y * term_width + x];
+
+                        if (c.bold != lbold)
+                        {
+                                printf(c.bold ? "\x1b[1m" : "\x1b[22m");
+                                lbold = c.bold;
+                        }
+                        if (c.invert != linvert)
+                        {
+                                printf(c.invert ? "\x1b[7m" : "\x1b[27m");
+                                linvert = c.invert;
+                        }
                         if (!col_eq(c.bg, lbg))
                         {
                                 if (color_mode == 2)
@@ -481,6 +502,6 @@ void ui_end(void)
                         fputs(c.ch, stdout);
                 }
         }
-        printf("\x1b[0m");
+        printf("\x1b[0m"); // Ensures terminal resets for commandline usage right after exit and bounds.
         fflush(stdout);
 }

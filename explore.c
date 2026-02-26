@@ -261,34 +261,69 @@ int main(void)
                         if (hovered || is_selected)
                                 ui_rect(screen_x + 1, screen_y, cell_w - 2, cell_h, item_bg);
 
+                        char display_name[256];
+                        strncpy(display_name, entries[i].name, sizeof(display_name) - 1);
+                        display_name[255] = '\0';
+
+                        char ext_fmt[5] = ".   ";
+                        int ext_len = 0;
+
+                        if (!entries[i].is_dir)
+                        {
+                                char *last_dot = strrchr(display_name, '.');
+                                if (last_dot && last_dot > display_name)
+                                {
+                                        int actual_ext_len = strlen(last_dot + 1);
+                                        // Ensure it's short enough to look good in the icon (1-3 chars)
+                                        if (actual_ext_len > 0 && actual_ext_len < 4)
+                                        {
+                                                ext_len = actual_ext_len;
+                                                for (int j = 0; j < ext_len; j++)
+                                                {
+                                                        char c = last_dot[1 + j];
+                                                        if (c >= 'a' && c <= 'z')
+                                                                c -= 32;
+                                                        ext_fmt[1 + j] = c;
+                                                }
+                                                *last_dot = '\0'; // Trim extension from display text below the icon
+                                        }
+                                }
+                        }
+
                         if (entries[i].is_dir)
                         {
-                                ui_text(screen_x + 2, screen_y + 0 + y_off, " ┌──┐___ ", icon_fg, item_bg);
-                                ui_text(screen_x + 2, screen_y + 1 + y_off, " │  └───│ ", icon_fg, item_bg);
-                                ui_text(screen_x + 2, screen_y + 2 + y_off, " │      │ ", icon_fg, item_bg);
-                                ui_text(screen_x + 2, screen_y + 3 + y_off, " └──────┘ ", icon_fg, item_bg);
+                                ui_text(screen_x + 2, screen_y + 0 + y_off, " ┌──┐___ ", icon_fg, item_bg, is_pressed, false);
+                                ui_text(screen_x + 2, screen_y + 1 + y_off, " │  └───│ ", icon_fg, item_bg, is_pressed, false);
+                                ui_text(screen_x + 2, screen_y + 2 + y_off, " │      │ ", icon_fg, item_bg, is_pressed, false);
+                                ui_text(screen_x + 2, screen_y + 3 + y_off, " └──────┘ ", icon_fg, item_bg, is_pressed, false);
                         }
                         else
                         {
-                                ui_text(screen_x + 2, screen_y + 0 + y_off, "  ┌──┐_ ", icon_fg, item_bg);
-                                ui_text(screen_x + 2, screen_y + 1 + y_off, "  │  └─│", icon_fg, item_bg);
-                                ui_text(screen_x + 2, screen_y + 2 + y_off, "  │    │", icon_fg, item_bg);
-                                ui_text(screen_x + 2, screen_y + 3 + y_off, "  └────┘", icon_fg, item_bg);
+                                ui_text(screen_x + 2, screen_y + 0 + y_off, "  ┌──┐_ ", icon_fg, item_bg, is_pressed, false);
+                                ui_text(screen_x + 2, screen_y + 1 + y_off, "  │  └─│", icon_fg, item_bg, is_pressed, false);
+                                ui_text(screen_x + 2, screen_y + 2 + y_off, "  │    │", icon_fg, item_bg, is_pressed, false);
+                                ui_text(screen_x + 2, screen_y + 3 + y_off, "  └────┘", icon_fg, item_bg, is_pressed, false);
+
+                                if (ext_len > 0)
+                                {
+                                        // screen_x + 5 exactly aligns with the 4 inner spaces in the "  │    │" string
+                                        ui_text(screen_x + 5, screen_y + 2 + y_off, ext_fmt, icon_fg, item_bg, is_pressed, true);
+                                }
                         }
 
-                        char line1[16];
-                        char line2[16];
+                        char line1[16] = {0};
+                        char line2[16] = {0};
                         int max_chars = cell_w - 2;
-                        int name_len = strlen(entries[i].name);
+                        int name_len = strlen(display_name);
 
                         if (name_len <= max_chars)
                         {
-                                strncpy(line1, entries[i].name, max_chars);
+                                strncpy(line1, display_name, max_chars);
                         }
                         else
                         {
-                                strncpy(line1, entries[i].name, max_chars);
-                                strncpy(line2, entries[i].name + max_chars, max_chars);
+                                strncpy(line1, display_name, max_chars);
+                                strncpy(line2, display_name + max_chars, max_chars);
 
                                 if (name_len > max_chars * 2)
                                 {
@@ -298,12 +333,12 @@ int main(void)
                         }
 
                         int pad1 = (cell_w - strlen(line1)) / 2;
-                        ui_text(screen_x + pad1, screen_y + 4 + y_off, line1, clr_text, item_bg);
+                        ui_text(screen_x + pad1, screen_y + 4 + y_off, line1, clr_text, item_bg, is_pressed, false);
 
                         if (strlen(line2) > 0)
                         {
                                 int pad2 = (cell_w - strlen(line2)) / 2;
-                                ui_text(screen_x + pad2, screen_y + 5 + y_off, line2, clr_text, item_bg);
+                                ui_text(screen_x + pad2, screen_y + 5 + y_off, line2, clr_text, item_bg, is_pressed, false);
                         }
 
                         if (hovered && term_mouse.clicked)
@@ -333,10 +368,10 @@ int main(void)
 
                 char header[PATH_MAX + 20];
                 snprintf(header, sizeof(header), " Directory: %s ", cwd);
-                ui_text(1, 0, header, (Color){0, 0, 0}, clr_bar);
+                ui_text(1, 0, header, (Color){0, 0, 0}, clr_bar, false, false);
 
                 ui_rect(0, term_height - 1, term_width, 1, clr_bar);
-                ui_text(1, term_height - 1, " Arrows: Navigate | Click/Enter: Open | Backspace: Up | 'q'/ESC: Quit ", (Color){0, 0, 0}, clr_bar);
+                ui_text(1, term_height - 1, " Arrows: Navigate | Click/Enter: Open | Backspace: Up | 'q'/ESC: Quit ", (Color){0, 0, 0}, clr_bar, false, false);
 
                 ui_cursor();
                 ui_end();
