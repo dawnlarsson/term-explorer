@@ -17,14 +17,14 @@ typedef struct
 } Color;
 typedef struct
 {
-        char ch[5]; // Upgraded for UTF-8 half-blocks
+        char ch[5];
         Color fg, bg;
 } Cell;
 typedef struct
 {
         int x, y;
-        int sub_y;    // 0 = top half, 1 = bottom half
-        bool has_sub; // True if we have raw pixel-level tracking
+        int sub_y;
+        bool has_sub;
         bool left, right, clicked;
         int wheel;
 } Mouse;
@@ -150,6 +150,7 @@ char term_poll(int timeout_ms)
         term_mouse.wheel = 0;
         char key = 0;
 
+        // Raw Linux Mouse (No wheel data natively)
         if (fd_m >= 0)
         {
                 unsigned char m[3];
@@ -171,40 +172,59 @@ char term_poll(int timeout_ms)
                         term_mouse.x = raw_mx / 8;
                         term_mouse.y = raw_my / 16;
                         term_mouse.sub_y = (raw_my / 8) % 2;
-                        term_mouse.has_sub = true; // Raw Linux tracking is active
+                        term_mouse.has_sub = true;
                 }
         }
 
+        // ANSI Escape Sequence Parser
         char buf[64];
         int n = read(STDIN_FILENO, buf, sizeof(buf));
         int i = 0;
         while (i < n)
         {
-                if (buf[i] == '\x1b' && i + 2 < n && buf[i + 1] == '[' && buf[i + 2] == '<')
+                if (buf[i] == '\x1b' && i + 2 < n && buf[i + 1] == '[')
                 {
-                        int b, x, y, offset = 0;
-                        char m_char;
-                        if (sscanf(buf + i + 3, "%d;%d;%d%c%n", &b, &x, &y, &m_char, &offset) >= 4)
+                        // Match Mouse Events
+                        if (buf[i + 2] == '<')
                         {
-                                term_mouse.x = x - 1;
-                                term_mouse.y = y - 1;
-                                raw_mx = term_mouse.x * 8;
-                                raw_my = term_mouse.y * 16;
-                                term_mouse.has_sub = false; // ANSI sequence fallback
+                                int b, x, y, offset = 0;
+                                char m_char;
+                                if (sscanf(buf + i + 3, "%d;%d;%d%c%n", &b, &x, &y, &m_char, &offset) >= 4)
+                                {
+                                        term_mouse.x = x - 1;
+                                        term_mouse.y = y - 1;
+                                        raw_mx = term_mouse.x * 8;
+                                        raw_my = term_mouse.y * 16;
+                                        term_mouse.has_sub = false;
 
-                                bool down = (m_char == 'M');
-                                if (b == 0 || b == 32)
-                                        term_mouse.left = down;
-                                if (b == 2 || b == 34)
-                                        term_mouse.right = down;
-                                if (b == 64 && down)
-                                        term_mouse.wheel = -1;
-                                if (b == 65 && down)
-                                        term_mouse.wheel = 1;
-                                i += 3 + offset;
-                                continue;
+                                        bool down = (m_char == 'M');
+                                        if (b == 0 || b == 32)
+                                                term_mouse.left = down;
+                                        if (b == 2 || b == 34)
+                                                term_mouse.right = down;
+                                        if (b == 64 && down)
+                                                term_mouse.wheel -= 1; // Accumulate scroll
+                                        if (b == 65 && down)
+                                                term_mouse.wheel += 1;
+                                        i += 3 + offset;
+                                        continue;
+                                }
                         }
+                        // Match ANSI Arrow Keys (Spoofing the mouse wheel)
+                        else if (buf[i + 2] == 'A')
+                        {
+                                term_mouse.wheel -= 1;
+                                i += 3;
+                                continue;
+                        } // Up Arrow
+                        else if (buf[i + 2] == 'B')
+                        {
+                                term_mouse.wheel += 1;
+                                i += 3;
+                                continue;
+                        } // Down Arrow
                 }
+
                 if (!key)
                         key = buf[i];
                 i++;
@@ -270,13 +290,13 @@ void ui_cursor(void)
                 if (term_mouse.has_sub)
                 {
                         if (term_mouse.sub_y == 0)
-                                strcpy(canvas[idx].ch, "\xe2\x96\x80"); // ▀ Top
+                                strcpy(canvas[idx].ch, "\xe2\x96\x80");
                         else
-                                strcpy(canvas[idx].ch, "\xe2\x96\x84"); // ▄ Bottom
+                                strcpy(canvas[idx].ch, "\xe2\x96\x84");
                 }
                 else
                 {
-                        strcpy(canvas[idx].ch, "\xe2\x96\xa0"); // ■ Solid Block Fallback
+                        strcpy(canvas[idx].ch, "\xe2\x96\xa0");
                 }
 
                 canvas[idx].fg = cc;

@@ -18,7 +18,6 @@ typedef struct
 FileEntry entries[1024];
 int entry_count = 0;
 
-// Upgraded kinetic scrolling state
 float target_scroll = 0.0f;
 float current_scroll = 0.0f;
 
@@ -42,7 +41,7 @@ void load_dir(const char *path)
         getcwd(cwd, sizeof(cwd));
 
         entry_count = 0;
-        target_scroll = 0; // Reset scroll on dir change
+        target_scroll = 0;
         current_scroll = 0;
 
         struct dirent *dir;
@@ -70,9 +69,15 @@ int main(void)
 
         while (1)
         {
-                char key = term_poll(16); // 16ms = ~60fps smooth rendering
+                char key = term_poll(16);
+
+                // Keyboard inputs
                 if (key == 'q')
                         break;
+                if (key == 'j')
+                        term_mouse.wheel += 1; // Vim down
+                if (key == 'k')
+                        term_mouse.wheel -= 1; // Vim up
 
                 int cell_w = 14;
                 int cell_h = 6;
@@ -83,27 +88,23 @@ int main(void)
 
                 int list_start_y = 2;
 
-                // Line-based scrolling math
                 int max_scroll_lines = (rows * cell_h) - (term_height - list_start_y - 1);
                 if (max_scroll_lines < 0)
                         max_scroll_lines = 0;
 
-                target_scroll += term_mouse.wheel * 4.0f; // Scroll speed multiplier
+                target_scroll += term_mouse.wheel * 4.0f;
                 if (target_scroll > max_scroll_lines)
                         target_scroll = max_scroll_lines;
                 if (target_scroll < 0)
                         target_scroll = 0;
 
-                // Kinetic lerp
                 current_scroll += (target_scroll - current_scroll) * 0.3f;
                 int scroll_offset = (int)current_scroll;
 
                 ui_begin();
 
-                // 1. Draw Background
                 ui_rect(0, 0, term_width, term_height, clr_bg);
 
-                // 2. Draw File Grid FIRST (will be clipped by UI bars later)
                 for (int i = 0; i < entry_count; i++)
                 {
                         int r = (i / cols);
@@ -112,11 +113,9 @@ int main(void)
                         int screen_x = c * cell_w;
                         int screen_y = list_start_y + (r * cell_h) - scroll_offset;
 
-                        // Cull totally off-screen items to save draw cycles
                         if (screen_y + cell_h < 0 || screen_y >= term_height)
                                 continue;
 
-                        // Hover checks bounds against Top/Bottom bars!
                         bool hovered = (term_mouse.x >= screen_x && term_mouse.x < screen_x + cell_w &&
                                         term_mouse.y >= screen_y && term_mouse.y < screen_y + cell_h &&
                                         term_mouse.y >= list_start_y && term_mouse.y < term_height - 1);
@@ -160,8 +159,7 @@ int main(void)
                         }
                 }
 
-                // 3. Draw UI Bars LAST (Z-Order Trick)
-                ui_rect(0, 0, term_width, list_start_y, clr_bg); // Erase scrolling items under header
+                ui_rect(0, 0, term_width, list_start_y, clr_bg);
                 ui_rect(0, 0, term_width, 1, clr_bar);
 
                 char header[PATH_MAX + 20];
