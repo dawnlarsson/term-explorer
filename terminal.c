@@ -22,7 +22,7 @@
 #define KEY_LEFT 1003
 #define KEY_ENTER 10
 #define KEY_ESC 27
-#define KEY_BACKSPACE 127 // Added Backspace
+#define KEY_BACKSPACE 127
 
 typedef struct
 {
@@ -139,7 +139,6 @@ int term_init(void)
         }
 
 #ifdef __linux__
-        // Hunt for the modern evdev mouse so we can get Wheel data on raw TTY
         for (int i = 0; i < 32; i++)
         {
                 char path[64];
@@ -164,7 +163,6 @@ int term_init(void)
                 }
         }
 #endif
-        // Fallback to legacy mouse
         if (fd_m < 0)
                 fd_m = open("/dev/input/mice", O_RDONLY | O_NONBLOCK);
 
@@ -188,11 +186,21 @@ int term_poll(int timeout_ms)
                 resize_flag = 0;
         }
 
+        // Center mouse on first valid poll
+        static bool init_mouse = true;
+        if (init_mouse && term_width > 0 && term_height > 0)
+        {
+                raw_mx = (term_width / 2) * 8;
+                raw_my = (term_height / 2) * 16;
+                term_mouse.x = term_width / 2;
+                term_mouse.y = term_height / 2;
+                init_mouse = false;
+        }
+
         bool last_left = term_mouse.left;
         term_mouse.wheel = 0;
         int key = 0;
 
-        // Raw Linux Mouse reading
         if (fd_m >= 0)
         {
 #ifdef __linux__
@@ -342,7 +350,6 @@ int term_poll(int timeout_ms)
                         key = buf[i];
                         if (key == '\r')
                                 key = KEY_ENTER;
-                        // Map both possible backspace values (DEL and BS)
                         if (key == 127 || key == 8)
                                 key = KEY_BACKSPACE;
                 }
@@ -360,10 +367,8 @@ void ui_begin(void)
         {
                 if (canvas)
                         free(canvas);
-
                 Cell *new_canvas = malloc(term_width * term_height * sizeof(Cell)) orelse { exit(1); };
                 canvas = new_canvas;
-
                 cw = term_width;
                 ch = term_height;
         }

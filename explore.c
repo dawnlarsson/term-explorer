@@ -21,7 +21,7 @@ int entry_count = 0;
 
 float target_scroll = 0.0f;
 float current_scroll = 0.0f;
-int selected_idx = 0;
+int selected_idx = -1;
 bool dragging_scroll = false;
 
 char cwd[PATH_MAX];
@@ -46,7 +46,7 @@ void load_dir(const char *path)
         entry_count = 0;
         target_scroll = 0;
         current_scroll = 0;
-        selected_idx = 0;
+        selected_idx = -1;
         dragging_scroll = false;
 
         struct dirent *dir;
@@ -66,7 +66,7 @@ void load_dir(const char *path)
                 stat(dir->d_name, &st);
 
                 strncpy(entries[entry_count].name, dir->d_name, 255);
-                entries[entry_count].name[255] = '\0'; // Guarantee termination
+                entries[entry_count].name[255] = '\0';
                 entries[entry_count].is_dir = S_ISDIR(st.st_mode);
                 entry_count++;
         }
@@ -105,7 +105,7 @@ int main(void)
                 int key = term_poll(timeout);
 
                 int cell_w = 14;
-                int cell_h = 6;
+                int cell_h = 7;
                 int cols = (term_width - 1) / cell_w;
                 if (cols < 1)
                         cols = 1;
@@ -116,7 +116,7 @@ int main(void)
                 int track_y = list_start_y;
                 int track_h = term_height - 1 - list_start_y;
                 if (track_h < 1)
-                        track_h = 1; // Prevent zero/negative track height
+                        track_h = 1;
 
                 if (key == 'q' || key == KEY_ESC)
                         break;
@@ -131,35 +131,47 @@ int main(void)
                 }
 
                 bool selection_changed = false;
-                if (key == KEY_RIGHT && selected_idx < entry_count - 1)
+
+                if ((key == KEY_RIGHT || key == KEY_LEFT || key == KEY_DOWN || key == KEY_UP) && selected_idx == -1)
                 {
-                        selected_idx++;
-                        selection_changed = true;
+                        if (entry_count > 0)
+                        {
+                                selected_idx = 0;
+                                selection_changed = true;
+                        }
                 }
-                if (key == KEY_LEFT && selected_idx > 0)
+                else
                 {
-                        selected_idx--;
-                        selection_changed = true;
-                }
-                if (key == KEY_DOWN && selected_idx + cols < entry_count)
-                {
-                        selected_idx += cols;
-                        selection_changed = true;
-                }
-                if (key == KEY_UP && selected_idx >= cols)
-                {
-                        selected_idx -= cols;
-                        selection_changed = true;
+                        if (key == KEY_RIGHT && selected_idx < entry_count - 1)
+                        {
+                                selected_idx++;
+                                selection_changed = true;
+                        }
+                        if (key == KEY_LEFT && selected_idx > 0)
+                        {
+                                selected_idx--;
+                                selection_changed = true;
+                        }
+                        if (key == KEY_DOWN && selected_idx + cols < entry_count)
+                        {
+                                selected_idx += cols;
+                                selection_changed = true;
+                        }
+                        if (key == KEY_UP && selected_idx >= cols)
+                        {
+                                selected_idx -= cols;
+                                selection_changed = true;
+                        }
                 }
 
-                if (key == KEY_ENTER && entry_count > 0 && entries[selected_idx].is_dir)
+                if (key == KEY_ENTER && entry_count > 0 && selected_idx >= 0 && entries[selected_idx].is_dir)
                 {
                         strncpy(next_dir, entries[selected_idx].name, sizeof(next_dir) - 1);
-                        next_dir[sizeof(next_dir) - 1] = '\0'; // Guarantee termination
+                        next_dir[sizeof(next_dir) - 1] = '\0';
                 }
 
                 int scroll_offset = (int)current_scroll;
-                if (selection_changed && entry_count > 0)
+                if (selection_changed && entry_count > 0 && selected_idx >= 0)
                 {
                         int sel_r = selected_idx / cols;
                         int sel_y = list_start_y + (sel_r * cell_h) - scroll_offset;
@@ -170,7 +182,6 @@ int main(void)
                                 target_scroll += (sel_y + cell_h - (term_height - 1));
                 }
 
-                // Calculate geometry BEFORE handling scroll events
                 int max_scroll_lines = (rows * cell_h) - track_h;
                 if (max_scroll_lines < 0)
                         max_scroll_lines = 0;
@@ -197,7 +208,6 @@ int main(void)
                         if (scrollable_track <= 0)
                                 scrollable_track = 1;
 
-                        // Map directly to the scrollable gap, offset to grab the thumb's center
                         float click_ratio = (float)(term_mouse.y - track_y - (thumb_h / 2)) / (float)scrollable_track;
                         if (click_ratio < 0.0f)
                                 click_ratio = 0.0f;
@@ -241,39 +251,60 @@ int main(void)
                                         term_mouse.x < term_width - 1);
 
                         bool is_selected = (i == selected_idx);
+                        bool is_pressed = (hovered && term_mouse.left);
 
-                        Color item_bg = (hovered || is_selected) ? clr_hover : clr_bg;
+                        Color item_bg = is_pressed ? (Color){130, 130, 130} : ((hovered || is_selected) ? clr_hover : clr_bg);
                         Color icon_fg = entries[i].is_dir ? clr_folder : clr_text;
+
+                        int y_off = is_pressed ? 1 : 0;
 
                         if (hovered || is_selected)
                                 ui_rect(screen_x + 1, screen_y, cell_w - 2, cell_h, item_bg);
 
                         if (entries[i].is_dir)
                         {
-                                ui_text(screen_x + 2, screen_y + 0, " ┌──┐___ ", icon_fg, item_bg);
-                                ui_text(screen_x + 2, screen_y + 1, " │  └───│ ", icon_fg, item_bg);
-                                ui_text(screen_x + 2, screen_y + 2, " │      │ ", icon_fg, item_bg);
-                                ui_text(screen_x + 2, screen_y + 3, " └──────┘ ", icon_fg, item_bg);
+                                ui_text(screen_x + 2, screen_y + 0 + y_off, " ┌──┐___ ", icon_fg, item_bg);
+                                ui_text(screen_x + 2, screen_y + 1 + y_off, " │  └───│ ", icon_fg, item_bg);
+                                ui_text(screen_x + 2, screen_y + 2 + y_off, " │      │ ", icon_fg, item_bg);
+                                ui_text(screen_x + 2, screen_y + 3 + y_off, " └──────┘ ", icon_fg, item_bg);
                         }
                         else
                         {
-                                ui_text(screen_x + 2, screen_y + 0, "  ┌──┐_ ", icon_fg, item_bg);
-                                ui_text(screen_x + 2, screen_y + 1, "  │  └─│", icon_fg, item_bg);
-                                ui_text(screen_x + 2, screen_y + 2, "  │    │", icon_fg, item_bg);
-                                ui_text(screen_x + 2, screen_y + 3, "  └────┘", icon_fg, item_bg);
+                                ui_text(screen_x + 2, screen_y + 0 + y_off, "  ┌──┐_ ", icon_fg, item_bg);
+                                ui_text(screen_x + 2, screen_y + 1 + y_off, "  │  └─│", icon_fg, item_bg);
+                                ui_text(screen_x + 2, screen_y + 2 + y_off, "  │    │", icon_fg, item_bg);
+                                ui_text(screen_x + 2, screen_y + 3 + y_off, "  └────┘", icon_fg, item_bg);
                         }
-                        char name_buf[16];
-                        strncpy(name_buf, entries[i].name, cell_w - 2);
-                        name_buf[cell_w - 2] = '\0';
 
-                        if (strlen(entries[i].name) > cell_w - 2)
+                        char line1[16];
+                        char line2[16];
+                        int max_chars = cell_w - 2;
+                        int name_len = strlen(entries[i].name);
+
+                        if (name_len <= max_chars)
                         {
-                                name_buf[cell_w - 4] = '.';
-                                name_buf[cell_w - 3] = '.';
+                                strncpy(line1, entries[i].name, max_chars);
+                        }
+                        else
+                        {
+                                strncpy(line1, entries[i].name, max_chars);
+                                strncpy(line2, entries[i].name + max_chars, max_chars);
+
+                                if (name_len > max_chars * 2)
+                                {
+                                        line2[max_chars - 2] = '.';
+                                        line2[max_chars - 1] = '.';
+                                }
                         }
 
-                        int pad = (cell_w - strlen(name_buf)) / 2;
-                        ui_text(screen_x + pad, screen_y + 4, name_buf, clr_text, item_bg);
+                        int pad1 = (cell_w - strlen(line1)) / 2;
+                        ui_text(screen_x + pad1, screen_y + 4 + y_off, line1, clr_text, item_bg);
+
+                        if (strlen(line2) > 0)
+                        {
+                                int pad2 = (cell_w - strlen(line2)) / 2;
+                                ui_text(screen_x + pad2, screen_y + 5 + y_off, line2, clr_text, item_bg);
+                        }
 
                         if (hovered && term_mouse.clicked)
                         {
