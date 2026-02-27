@@ -446,89 +446,28 @@ typedef struct
         bool active;
         int x, y;
         int w, h;
+        UIListState list;
 } UIContextState;
 
 static UIContextState global_ctx;
 static int global_ctx_target = -1;
 
-void ui_context_open(int x, int y, int target_idx)
+void ui_list_set_mode(UIListState *s, const UIListParams *p, UIListMode mode)
 {
-        global_ctx.active = true;
-        global_ctx.x = x;
-        global_ctx.y = y;
-        global_ctx.w = 0;
-        global_ctx_target = target_idx;
-}
-
-int ui_context_target(void)
-{
-        return global_ctx_target;
-}
-
-bool ui_context_do(const char **items, int count, int *out_idx)
-{
-        if (!global_ctx.active)
-                return false;
-
-        if (global_ctx.w == 0)
-        {
-                int max_w = 0;
-                for (int i = 0; i < count; i++)
-                {
-                        int len = strlen(items[i]);
-                        if (len > max_w)
-                                max_w = len;
-                }
-                global_ctx.w = max_w + 2;
-                global_ctx.h = count;
-        }
-
-        ui_rect(global_ctx.x, global_ctx.y, global_ctx.w, global_ctx.h, (Color){15, 15, 15});
-
-        bool action_taken = false;
-
-        for (int i = 0; i < count; i++)
-        {
-                int item_y = global_ctx.y + i;
-                bool hovered = (term_mouse.x >= global_ctx.x && term_mouse.x < global_ctx.x + global_ctx.w &&
-                                term_mouse.y == item_y);
-
-                Color bg = hovered ? (Color){35, 35, 35} : (Color){15, 15, 15};
-                ui_rect(global_ctx.x, item_y, global_ctx.w, 1, bg);
-                ui_text(global_ctx.x + 1, item_y, items[i], (Color){255, 255, 255}, bg, false, false);
-
-                if (hovered && term_mouse.clicked)
-                {
-                        *out_idx = i;
-                        action_taken = true;
-                }
-        }
-
-        if (term_mouse.clicked)
-        {
-                global_ctx.active = false;
-                global_ctx.w = 0;
-        }
-
-        return action_taken;
-}
-
-void ui_list_set_mode(UIListState *s, const UIListParams *p, UIListMode new_mode)
-{
-        if (s->mode == new_mode)
+        if (s->mode == mode)
                 return;
 
-        int old_cols = (s->mode == UI_MODE_LIST) ? 1 : ((p->w - 1) / p->cell_w > 0 ? (p->w - 1) / p->cell_w : 1);
-        int old_c_h = (s->mode == UI_MODE_LIST) ? 1 : p->cell_h;
+        s->mode = mode;
 
-        int top_idx = (((int)s->target_scroll + (old_c_h / 2)) / old_c_h) * old_cols;
+        if (s->selected_idx >= 0)
+        {
+                int cols = (s->mode == UI_MODE_LIST) ? 1 : ((p->w - 1) / p->cell_w > 0 ? (p->w - 1) / p->cell_w : 1);
+                int c_h = (s->mode == UI_MODE_LIST) ? 1 : p->cell_h;
+                int row = s->selected_idx / cols;
 
-        s->mode = new_mode;
-
-        int new_cols = (s->mode == UI_MODE_LIST) ? 1 : ((p->w - 1) / p->cell_w > 0 ? (p->w - 1) / p->cell_w : 1);
-        int new_c_h = (s->mode == UI_MODE_LIST) ? 1 : p->cell_h;
-
-        s->target_scroll = s->current_scroll = (top_idx / new_cols) * new_c_h;
+                s->target_scroll = (float)(row * c_h);
+                s->current_scroll = s->target_scroll;
+        }
 }
 
 void ui_list_begin(UIListState *s, const UIListParams *p, int key)
@@ -607,6 +546,12 @@ void ui_list_begin(UIListState *s, const UIListParams *p, int key)
         s->target_scroll += s->scroll_velocity;
         s->scroll_velocity *= friction;
 
+        if (s != &global_ctx.list && (s->dragging_scroll || wheel_val != 0))
+        {
+                global_ctx.active = false;
+                global_ctx.w = 0;
+        }
+
         if (s->scroll_velocity > -0.05f && s->scroll_velocity < 0.05f)
                 s->scroll_velocity = 0.0f;
 
@@ -651,13 +596,15 @@ bool ui_list_do_item(UIListState *s, const UIListParams *p, int index, int *out_
         *out_x = screen_x;
         *out_y = screen_y;
 
-        *is_hovered = (!global_ctx.active && !s->dragging_scroll &&
+        bool is_ctx_list = (s == &global_ctx.list);
+
+        *is_hovered = ((!global_ctx.active || is_ctx_list) && !s->dragging_scroll &&
                        term_mouse.x >= screen_x && term_mouse.x < screen_x + c_w &&
                        term_mouse.y >= screen_y && term_mouse.y < screen_y + c_h &&
                        term_mouse.y >= p->y && term_mouse.y < p->y + p->h && term_mouse.x < p->x + p->w - 1);
         *is_pressed = (*is_hovered && term_mouse.left);
 
-        if (*is_hovered && term_mouse.clicked)
+        if (*is_hovered && (term_mouse.clicked || term_mouse.right_clicked))
         {
                 s->selected_idx = index;
                 s->clicked_on_item = true;
@@ -691,4 +638,124 @@ void ui_list_end(UIListState *s, const UIListParams *p)
                 Color thumb_col = s->dragging_scroll ? (Color){255, 255, 255} : p->scrollbar_fg;
                 ui_rect(p->x + p->w - 1, p->y + (int)((s->current_scroll / max_scroll) * (p->h - thumb_h)), 1, thumb_h, thumb_col);
         }
+}
+
+void ui_context_open(int x, int y, int target_idx)
+{
+        global_ctx.active = true;
+        global_ctx.x = x;
+        global_ctx.y = y;
+        global_ctx.w = 0;
+        global_ctx_target = target_idx;
+
+        global_ctx.list.current_scroll = 0;
+        global_ctx.list.target_scroll = 0;
+        global_ctx.list.scroll_velocity = 0;
+        global_ctx.list.dragging_scroll = false;
+        global_ctx.list.selected_idx = -1;
+        global_ctx.list.mode = UI_MODE_LIST;
+}
+
+int ui_context_target(void)
+{
+        return global_ctx_target;
+}
+
+void ui_context_close(void)
+{
+        global_ctx.active = false;
+        global_ctx.w = 0;
+}
+
+bool ui_context_do(const char **items, int count, int *out_idx)
+{
+        if (!global_ctx.active)
+                return false;
+
+        if (global_ctx.w == 0)
+        {
+                int max_w = 0;
+                for (int i = 0; i < count; i++)
+                {
+                        int len = strlen(items[i]);
+                        if (len > max_w)
+                                max_w = len;
+                }
+                global_ctx.w = max_w + 3; // +2 for padding, +1 for scrollbar
+                global_ctx.h = count;
+
+                if (global_ctx.y + global_ctx.h > term_height)
+                {
+                        global_ctx.h = term_height - global_ctx.y;
+                        if (global_ctx.h < 4 && count >= 4)
+                        {
+                                global_ctx.y = term_height - count;
+                                if (global_ctx.y < 0)
+                                        global_ctx.y = 0;
+                                global_ctx.h = count;
+                                if (global_ctx.h > term_height)
+                                        global_ctx.h = term_height;
+                        }
+                }
+        }
+
+        ui_rect(global_ctx.x, global_ctx.y, global_ctx.w, global_ctx.h, (Color){15, 15, 15});
+
+        UIListParams params = {
+            .x = global_ctx.x,
+            .y = global_ctx.y,
+            .w = global_ctx.w,
+            .h = global_ctx.h,
+            .item_count = count,
+            .cell_w = global_ctx.w,
+            .cell_h = 1,
+            .bg = (Color){15, 15, 15},
+            .scrollbar_bg = (Color){25, 25, 25},
+            .scrollbar_fg = (Color){100, 100, 100}};
+
+        ui_list_begin(&global_ctx.list, &params, 0);
+
+        bool action_taken = false;
+
+        for (int i = 0; i < count; i++)
+        {
+                int sx, sy;
+                bool hovered, pressed;
+                if (ui_list_do_item(&global_ctx.list, &params, i, &sx, &sy, &hovered, &pressed))
+                {
+                        Color bg = (hovered || global_ctx.list.selected_idx == i) ? (Color){35, 35, 35} : (Color){15, 15, 15};
+                        if (pressed)
+                                bg = (Color){60, 60, 60};
+
+                        int item_w = params.w - 1;
+                        ui_rect(sx, sy, item_w, 1, bg);
+                        ui_text(sx + 1, sy, items[i], (Color){255, 255, 255}, bg, false, false);
+
+                        if (hovered && term_mouse.clicked)
+                        {
+                                *out_idx = i;
+                                action_taken = true;
+                        }
+                }
+        }
+
+        ui_list_end(&global_ctx.list, &params);
+
+        if (term_mouse.clicked && !action_taken && !global_ctx.list.dragging_scroll)
+        {
+                if (!(term_mouse.x >= global_ctx.x && term_mouse.x < global_ctx.x + params.w &&
+                      term_mouse.y >= global_ctx.y && term_mouse.y < global_ctx.y + params.h))
+                {
+                        global_ctx.active = false;
+                        global_ctx.w = 0;
+                }
+        }
+
+        if (action_taken)
+        {
+                global_ctx.active = false;
+                global_ctx.w = 0;
+        }
+
+        return action_taken;
 }

@@ -9,6 +9,7 @@ typedef struct
 {
         char name[256];
         bool is_dir;
+        off_t size;
 } FileEntry;
 
 typedef struct
@@ -60,6 +61,7 @@ void app_load_dir(AppState *app, const char *path)
                 struct stat st;
                 (stat(dir->d_name, &st) == 0) orelse continue;
                 strcpy(app->entries[app->count].name, dir->d_name);
+                app->entries[app->count].size = st.st_size;
                 app->entries[app->count++].is_dir = S_ISDIR(st.st_mode);
         }
         qsort(app->entries, app->count, sizeof(FileEntry), cmp_entries);
@@ -128,6 +130,20 @@ void draw_item_list(AppState *app, int i, int sx, int sy, bool hovered, bool pre
         strncpy(l, app->entries[i].name, copy_len);
         l[copy_len] = '\0';
         ui_text(sx + 8, sy, l, clr_text, item_bg, false, false);
+
+        raw char size_str[32];
+        if (!app->entries[i].is_dir)
+        {
+                if (app->entries[i].size < 1024)
+                        snprintf(size_str, 32, "%lld B", (long long)app->entries[i].size);
+                else if (app->entries[i].size < 1024 * 1024)
+                        snprintf(size_str, 32, "%lld KB", (long long)(app->entries[i].size / 1024));
+                else if (app->entries[i].size < 1024 * 1024 * 1024)
+                        snprintf(size_str, 32, "%lld MB", (long long)(app->entries[i].size / (1024 * 1024)));
+                else
+                        snprintf(size_str, 32, "%lld GB", (long long)(app->entries[i].size / (1024 * 1024 * 1024)));
+                ui_text(sx + item_w - 10, sy, size_str, clr_bar, item_bg, false, false);
+        }
 }
 
 void handle_input(AppState *app, int key, const UIListParams *params)
