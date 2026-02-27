@@ -20,6 +20,8 @@ typedef struct
         char next_dir[PATH_MAX];
         UIListState list;
         bool quit;
+        UIContextState context;
+        int target_idx;
 } AppState;
 
 int cmp_entries(const void *a, const void *b)
@@ -30,7 +32,11 @@ int cmp_entries(const void *a, const void *b)
 
 void app_load_dir(AppState *app, const char *path)
 {
-        DIR *d = opendir(path) orelse return;
+        DIR *d = opendir(path) orelse
+        {
+                d = opendir(".");
+                strcpy(app->cwd, ".");
+        };
         defer closedir(d);
 
         (chdir(path) == 0) orelse return;
@@ -55,7 +61,7 @@ void app_load_dir(AppState *app, const char *path)
                 }
 
                 struct stat st;
-                stat(dir->d_name, &st);
+                (stat(dir->d_name, &st) == 0) orelse continue;
                 strcpy(app->entries[app->count].name, dir->d_name);
                 app->entries[app->count++].is_dir = S_ISDIR(st.st_mode);
         }
@@ -148,10 +154,10 @@ int main(void)
         term_init() orelse return 1;
         defer term_restore();
 
-        // One struct cleanly replaces all the loose globals
         AppState app;
         app.list.mode = UI_MODE_GRID;
         app.next_dir[0] = '\0';
+        app.context.active = false;
 
         defer free(app.entries);
         app_load_dir(&app, ".");
@@ -171,7 +177,7 @@ int main(void)
                 int key = term_poll(timeout);
 
                 UIListParams params = {
-                    .x = 0, .y = 2, .w = term_width, .h = term_height - 3 > 0 ? term_height - 3 : 1, .item_count = app.count, .cell_w = 14, .cell_h = 7, .bg = clr_bg, .scrollbar_bg = (Color){30, 30, 30}, .scrollbar_fg = clr_bar};
+                    .x = 0, .y = 1, .w = term_width, .h = term_height - 2 > 0 ? term_height - 2 : 1, .item_count = app.count, .cell_w = 14, .cell_h = 7, .bg = clr_bg, .scrollbar_bg = (Color){30, 30, 30}, .scrollbar_fg = clr_bar};
 
                 handle_input(&app, key, &params);
 
@@ -187,6 +193,18 @@ int main(void)
 
                         if (ui_list_do_item(&app.list, &params, i, &sx, &sy, &hovered, &pressed))
                         {
+                                if (app.context.active)
+                                {
+                                        pressed = false;
+
+                                        if (app.context.w > 0 &&
+                                            term_mouse.x >= app.context.x && term_mouse.x < app.context.x + app.context.w &&
+                                            term_mouse.y >= app.context.y && term_mouse.y < app.context.y + app.context.h)
+                                        {
+                                                hovered = false;
+                                        }
+                                }
+
                                 if (app.list.mode == UI_MODE_GRID)
                                 {
                                         draw_item_grid(&app, i, sx, sy, hovered, pressed, params.cell_w, params.cell_h);
@@ -196,8 +214,16 @@ int main(void)
                                         draw_item_list(&app, i, sx, sy, hovered, pressed, params.w - 1);
                                 }
 
-                                if (hovered && term_mouse.clicked && app.entries[i].is_dir)
+                                if (hovered && term_mouse.clicked && app.entries[i].is_dir && !app.context.active)
                                         strcpy(app.next_dir, app.entries[i].name);
+                        }
+
+                        if (hovered && term_mouse.right_clicked)
+                        {
+                                app.context.active = true;
+                                app.context.x = term_mouse.x;
+                                app.context.y = term_mouse.y;
+                                app.target_idx = i;
                         }
                 }
 
@@ -211,6 +237,28 @@ int main(void)
 
                 ui_rect(0, term_height - 1, term_width, 1, clr_bar);
                 ui_text(1, term_height - 1, " Arrows: Navigate | v: Toggle View | Backspace: Up | 'q': Quit ", (Color){0, 0, 0}, clr_bar, false, false);
+
+                const char *menu_options[] = {"Open", "Rename", "Delete", "Cancel"};
+                int selected_action = -1;
+
+                if (ui_context_menu(&app.context, menu_options, 4, &selected_action))
+                {
+                        FileEntry *target = &app.entries[app.target_idx];
+
+                        switch (selected_action)
+                        {
+                        case 0: // Open
+                                if (target->is_dir)
+                                        strcpy(app.next_dir, target->name);
+                                break;
+                        case 1: // Rename
+                                // TODO: trigger a text input primitive
+                                break;
+                        case 2: // Delete
+                                // TODO: unlink() or rmdir()
+                                break;
+                        }
+                }
 
                 ui_cursor();
                 ui_end();

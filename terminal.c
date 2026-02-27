@@ -28,16 +28,18 @@ typedef struct
 {
         int r, g, b;
 } Color;
+
 typedef struct
 {
         char ch[5];
         Color fg, bg;
         bool bold, invert;
 } Cell;
+
 typedef struct
 {
         int x, y, sub_y, wheel;
-        bool has_sub, left, right, clicked;
+        bool has_sub, left, right, clicked, right_clicked;
 } Mouse;
 
 Mouse term_mouse;
@@ -156,6 +158,7 @@ int term_poll(int timeout_ms)
         }
 
         bool last_left = term_mouse.left;
+        bool last_right = term_mouse.right;
         term_mouse.wheel = 0;
         int key = 0;
 
@@ -275,6 +278,7 @@ int term_poll(int timeout_ms)
                                                                                             : buf[i];
         }
         term_mouse.clicked = (!last_left && term_mouse.left);
+        term_mouse.right_clicked = (!last_right && term_mouse.right);
         return key;
 }
 
@@ -306,6 +310,10 @@ void ui_rect(int x, int y, int w, int h, Color bg)
                         if (c < 0 || c >= term_width)
                                 continue;
                         canvas[r * term_width + c].bg = bg;
+                        canvas[r * term_width + c].fg = bg;
+                        canvas[r * term_width + c].invert = false;
+                        canvas[r * term_width + c].bold = false;
+                        strcpy(canvas[r * term_width + c].ch, " ");
                 }
         }
 }
@@ -578,4 +586,59 @@ void ui_list_end(UIListState *s, const UIListParams *p)
                 Color thumb_col = s->dragging_scroll ? (Color){255, 255, 255} : p->scrollbar_fg;
                 ui_rect(p->x + p->w - 1, p->y + (int)((s->current_scroll / max_scroll) * (p->h - thumb_h)), 1, thumb_h, thumb_col);
         }
+}
+
+typedef struct
+{
+        bool active;
+        int x, y;
+        int w, h;
+} UIContextState;
+
+bool ui_context_menu(UIContextState *ctx, const char **items, int count, int *out_idx)
+{
+        if (!ctx->active)
+                return false;
+
+        if (ctx->w == 0)
+        {
+                int max_w = 0;
+                for (int i = 0; i < count; i++)
+                {
+                        int len = strlen(items[i]);
+                        if (len > max_w)
+                                max_w = len;
+                }
+                ctx->w = max_w + 2;
+                ctx->h = count;
+        }
+
+        ui_rect(ctx->x, ctx->y, ctx->w, ctx->h, (Color){60, 60, 60});
+
+        bool action_taken = false;
+
+        for (int i = 0; i < count; i++)
+        {
+                int item_y = ctx->y + i;
+                bool hovered = (term_mouse.x >= ctx->x && term_mouse.x < ctx->x + ctx->w &&
+                                term_mouse.y == item_y);
+
+                Color bg = hovered ? (Color){100, 100, 100} : (Color){60, 60, 60};
+                ui_rect(ctx->x, item_y, ctx->w, 1, bg);
+                ui_text(ctx->x + 1, item_y, items[i], (Color){255, 255, 255}, bg, false, false);
+
+                if (hovered && term_mouse.clicked)
+                {
+                        *out_idx = i;
+                        action_taken = true;
+                }
+        }
+
+        if (term_mouse.clicked)
+        {
+                ctx->active = false;
+                ctx->w = 0;
+        }
+
+        return action_taken;
 }
