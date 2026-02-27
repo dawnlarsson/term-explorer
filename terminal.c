@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <stdbool.h>
+#include <math.h>
 
 #ifdef __linux__
 #include <linux/input.h>
@@ -464,13 +465,9 @@ void ui_list_begin(UIListState *s, const UIListParams *p, int key)
                 int row = s->selected_idx / cols;
                 int item_top = row * c_h;
                 if (item_top < (int)s->target_scroll)
-                {
                         s->target_scroll = (float)item_top;
-                }
                 else if (item_top + c_h > (int)s->target_scroll + p->h)
-                {
                         s->target_scroll = (float)(item_top + c_h - p->h);
-                }
         }
 
         int max_scroll = rows * c_h > p->h ? rows * c_h - p->h : 0;
@@ -492,20 +489,27 @@ void ui_list_begin(UIListState *s, const UIListParams *p, int key)
                 s->scroll_velocity = 0.0f;
         }
 
-        if (s->mode == UI_MODE_LIST)
-        {
-                s->scroll_velocity += term_mouse.wheel * 1.5f;
-                s->target_scroll += s->scroll_velocity;
-                s->scroll_velocity *= 0.82f;
+        float friction = 0.82f;
+        float wheel_val = term_mouse.wheel;
 
-                if (s->scroll_velocity > -0.01f && s->scroll_velocity < 0.01f)
-                        s->scroll_velocity = 0.0f;
-        }
-        else
+        if (wheel_val != 0)
         {
-                s->target_scroll += term_mouse.wheel * c_h;
-                s->scroll_velocity = 0.0f;
+                float base_power = (s->mode == UI_MODE_LIST) ? 0.18f : ((float)c_h * 0.1f);
+
+                float wheel_dir = wheel_val > 0 ? 1.0f : -1.0f;
+                float vel_dir = s->scroll_velocity > 0 ? 1.0f : (s->scroll_velocity < 0 ? -1.0f : 0.0f);
+
+                if (vel_dir == wheel_dir && fabsf(s->scroll_velocity) > 0.05f)
+                        base_power *= (2.5f + fabsf(s->scroll_velocity) * 1.2f);
+
+                s->scroll_velocity += wheel_val * base_power;
         }
+
+        s->target_scroll += s->scroll_velocity;
+        s->scroll_velocity *= friction;
+
+        if (s->scroll_velocity > -0.05f && s->scroll_velocity < 0.05f)
+                s->scroll_velocity = 0.0f;
 
         if (s->target_scroll > max_scroll)
         {
@@ -518,13 +522,18 @@ void ui_list_begin(UIListState *s, const UIListParams *p, int key)
                 s->scroll_velocity = 0.0f;
         }
 
+        if (!s->dragging_scroll && s->scroll_velocity == 0.0f)
+        {
+                float snap_target = (float)(((int)(s->target_scroll + (c_h / 2.0f)) / c_h) * c_h);
+                if (snap_target <= max_scroll)
+                        s->target_scroll = snap_target;
+        }
+
         if (!s->dragging_scroll)
         {
                 s->current_scroll += (s->target_scroll - s->current_scroll) * 0.3f;
                 if (s->target_scroll - s->current_scroll > -0.05f && s->target_scroll - s->current_scroll < 0.05f)
-                {
                         s->current_scroll = s->target_scroll;
-                }
         }
 }
 
