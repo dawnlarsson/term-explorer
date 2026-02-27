@@ -151,7 +151,7 @@ void draw_item_list(AppState *app, int i, const UIItemResult *item)
                 copy_len = 0;
         strncpy(l, app->entries[i].name, copy_len);
 
-        ui_text(item->x + 8, item->y, l, clr_text, item_bg, false, false);
+        ui_text(item->x + 5, item->y, l, clr_text, item_bg, false, false);
 
         char size_str[32];
         if (!app->entries[i].is_dir)
