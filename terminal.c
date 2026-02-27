@@ -835,12 +835,46 @@ void ui_list_end(UIListState *s)
 
         if (max_scroll > 0)
         {
-                int thumb_h = s->p.h * s->p.h / (rows * c_h);
-                if (thumb_h < 1)
-                        thumb_h = 1;
-                ui_rect(s->p.x + s->p.w - 1, s->p.y, 1, s->p.h, s->p.scrollbar_bg);
+                bool hover = (!s->dragging_scroll && term_mouse.x == s->p.x + s->p.w - 1 &&
+                              term_mouse.y >= s->p.y && term_mouse.y < s->p.y + s->p.h);
                 Color thumb_col = s->dragging_scroll ? (Color){255, 255, 255} : s->p.scrollbar_fg;
-                ui_rect(s->p.x + s->p.w - 1, s->p.y + (int)((s->current_scroll / max_scroll) * (s->p.h - thumb_h)), 1, thumb_h, thumb_col);
+
+                int thumb_h_half = (s->p.h * 2) * s->p.h / (rows * c_h);
+                if (thumb_h_half < 2)
+                        thumb_h_half = 2;
+                int thumb_top_half = (int)((s->current_scroll / max_scroll) * (s->p.h * 2 - thumb_h_half));
+                int thumb_bot_half = thumb_top_half + thumb_h_half;
+
+                for (int y = 0; y < s->p.h; y++)
+                {
+                        int cell_top = y * 2;
+                        int cell_bot = y * 2 + 1;
+                        bool top_in = (cell_top >= thumb_top_half && cell_top < thumb_bot_half);
+                        bool bot_in = (cell_bot >= thumb_top_half && cell_bot < thumb_bot_half);
+
+                        const char *ch = " ";
+                        Color fg = thumb_col;
+
+                        if (top_in && bot_in)
+                        {
+                                ch = "\xe2\x96\x88";
+                        }
+                        else if (top_in)
+                        {
+                                ch = "\xe2\x96\x80";
+                        }
+                        else if (bot_in)
+                        {
+                                ch = "\xe2\x96\x84";
+                        }
+                        else if (hover)
+                        {
+                                ch = "\xe2\x96\x91";
+                                fg = s->p.scrollbar_fg;
+                        }
+
+                        ui_text(s->p.x + s->p.w - 1, s->p.y + y, ch, fg, s->p.scrollbar_bg, false, false);
+                }
         }
 }
 

@@ -101,7 +101,7 @@ void draw_item_grid(AppState *app, int i, const UIItemResult *item)
                 }
         }
 
-        const char *icon_dir[] = {" ┌──┐___ ", " │  └───│ ", " │      │ ", " └──────┘ "};
+        const char *icon_dir[] = {" ┌─┐____ ", " │ └────│ ", " │      │ ", " └──────┘ "};
         const char *icon_file[] = {"  ┌──┐_ ", "  │  └─│", "  │    │", "  └────┘"};
         const char **icon = app->entries[i].is_dir ? icon_dir : icon_file;
         int y_off = item->pressed ? 1 : 0;
@@ -144,14 +144,14 @@ void draw_item_list(AppState *app, int i, const UIItemResult *item)
         if (!app->entries[i].is_dir)
         {
                 if (app->entries[i].size < 1024)
-                        snprintf(size_str, 32, "%lld B", (long long)app->entries[i].size);
+                        snprintf(size_str, 32, "%4lld B ", (long long)app->entries[i].size);
                 else if (app->entries[i].size < 1024 * 1024)
-                        snprintf(size_str, 32, "%lld KB", (long long)(app->entries[i].size / 1024));
+                        snprintf(size_str, 32, "%4lld KB", (long long)(app->entries[i].size / 1024));
                 else if (app->entries[i].size < 1024 * 1024 * 1024)
-                        snprintf(size_str, 32, "%lld MB", (long long)(app->entries[i].size / (1024 * 1024)));
+                        snprintf(size_str, 32, "%4lld MB", (long long)(app->entries[i].size / (1024 * 1024)));
                 else
-                        snprintf(size_str, 32, "%lld GB", (long long)(app->entries[i].size / (1024 * 1024 * 1024)));
-                ui_text(item->x + item->w - 10, item->y, size_str, clr_bar, item_bg, false, false);
+                        snprintf(size_str, 32, "%4lld GB", (long long)(app->entries[i].size / (1024 * 1024 * 1024)));
+                ui_text(item->x + item->w - 8, item->y, size_str, clr_bar, item_bg, false, false);
         }
 }
 
