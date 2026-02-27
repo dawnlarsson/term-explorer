@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <termios.h>
 #include <sys/ioctl.h>
+#include <sys/time.h>
 #include <string.h>
 #include <signal.h>
 #include <fcntl.h>
@@ -20,6 +21,12 @@
 #define KEY_DOWN 1001
 #define KEY_RIGHT 1002
 #define KEY_LEFT 1003
+#define KEY_PAGE_UP 1004
+#define KEY_PAGE_DOWN 1005
+#define KEY_END 1006
+#define KEY_HOME 1007
+#define KEY_SHIFT_PAGE_UP 1008
+#define KEY_SHIFT_PAGE_DOWN 1009
 #define KEY_ENTER 10
 #define KEY_ESC 27
 #define KEY_BACKSPACE 127
@@ -212,10 +219,18 @@ int term_poll(int timeout_ms)
         {
                 if (buf[i] == '\033')
                 {
-                        if (i + 1 >= n || buf[i + 1] != '[')
+                        if (i + 3 < n && buf[i + 3] == '~')
                         {
-                                key = KEY_ESC;
-                                continue;
+                                if (buf[i + 2] == '5')
+                                        key = KEY_PAGE_UP;
+                                else if (buf[i + 2] == '6')
+                                        key = KEY_PAGE_DOWN;
+
+                                if (key)
+                                {
+                                        i += 3;
+                                        continue;
+                                }
                         }
                         if (i + 2 < n && buf[i + 2] == '<')
                         {
@@ -240,25 +255,65 @@ int term_poll(int timeout_ms)
                                         continue;
                                 }
                         }
-                        else if (i + 5 < n && buf[i + 2] == 'M')
+                        else if (i + 5 < n && buf[i + 5] == '~' && buf[i + 3] == ';' && buf[i + 4] == '2')
                         {
-                                int b = buf[i + 3] - 32, x = buf[i + 4] - 32, y = buf[i + 5] - 32;
-                                term_mouse.hide_cursor = true;
-                                term_mouse.x = x - 1;
-                                term_mouse.y = y - 1;
-                                term_mouse.has_sub = false;
-                                if (b == 0 || b == 32)
-                                        term_mouse.left = true;
-                                else if (b == 2 || b == 34)
-                                        term_mouse.right = true;
-                                else if (b == 3 || b == 35)
-                                        term_mouse.left = term_mouse.right = false;
-                                else if (b == 64)
-                                        term_mouse.wheel--;
-                                else if (b == 65)
-                                        term_mouse.wheel++;
-                                i += 6;
-                                continue;
+                                if (buf[i + 2] == '5')
+                                        key = KEY_SHIFT_PAGE_UP;
+                                else if (buf[i + 2] == '6')
+                                        key = KEY_SHIFT_PAGE_DOWN;
+                                if (key)
+                                {
+                                        i += 5;
+                                        continue;
+                                }
+                        }
+                        else if (i + 3 < n && buf[i + 3] == '~')
+                        {
+                                if (buf[i + 2] == '5')
+                                        key = KEY_PAGE_UP;
+                                else if (buf[i + 2] == '6')
+                                        key = KEY_PAGE_DOWN;
+                                else if (buf[i + 2] == '4' || buf[i + 2] == '8')
+                                        key = KEY_END;
+                                else if (buf[i + 2] == '1' || buf[i + 2] == '7')
+                                        key = KEY_HOME;
+                                if (key)
+                                {
+                                        i += 3;
+                                        continue;
+                                }
+                        }
+                        else if (i + 2 < n && buf[i + 1] == 'O')
+                        {
+                                if (buf[i + 2] == 'F')
+                                        key = KEY_END;
+                                else if (buf[i + 2] == 'H')
+                                        key = KEY_HOME;
+                                if (key)
+                                {
+                                        i += 2;
+                                        continue;
+                                }
+                        }
+                        else if (i + 2 < n)
+                        {
+                                if (buf[i + 2] == 'A')
+                                        key = KEY_UP;
+                                else if (buf[i + 2] == 'B')
+                                        key = KEY_DOWN;
+                                else if (buf[i + 2] == 'C')
+                                        key = KEY_RIGHT;
+                                else if (buf[i + 2] == 'D')
+                                        key = KEY_LEFT;
+                                else if (buf[i + 2] == 'F')
+                                        key = KEY_END;
+                                else if (buf[i + 2] == 'H')
+                                        key = KEY_HOME;
+                                if (key)
+                                {
+                                        i += 2;
+                                        continue;
+                                }
                         }
                         else if (i + 2 < n)
                         {
@@ -367,7 +422,7 @@ void ui_text_centered(int x, int y, int w, const char *txt, Color fg, Color bg, 
         ui_text(px < x ? x : px, y, txt, fg, bg, bold, invert);
 }
 
-void ui_cursor(void)
+static void ui_cursor(void)
 {
         if (term_mouse.hide_cursor)
                 return;
@@ -382,6 +437,8 @@ void ui_cursor(void)
 
 void ui_end(void)
 {
+        ui_cursor();
+
         Color lfg = {-1, -1, -1}, lbg = {-1, -1, -1};
         bool lbold = false, linvert = false;
         printf("\033[H");
@@ -425,21 +482,26 @@ typedef enum
 
 typedef struct
 {
+        int x, y, w, h;
+        int item_count;
+        int cell_w, cell_h;
+        Color bg, scrollbar_bg, scrollbar_fg;
+} UIListParams;
+
+typedef struct
+{
         float target_scroll, current_scroll, scroll_velocity;
         float drag_offset;
         bool dragging_scroll;
         int selected_idx;
         UIListMode mode;
         bool clicked_on_item;
-} UIListState;
+        UIListParams p;
 
-typedef struct
-{
-        int x, y, w, h;
-        int item_count;
-        int cell_w, cell_h;
-        Color bg, scrollbar_bg, scrollbar_fg;
-} UIListParams;
+        int last_nav_key;
+        int nav_key_streak;
+        long long last_nav_time;
+} UIListState;
 
 typedef struct
 {
@@ -449,8 +511,32 @@ typedef struct
         UIListState list;
 } UIContextState;
 
+typedef struct
+{
+        int x, y, w, h;
+        bool hovered;
+        bool pressed;
+        bool clicked;
+        bool right_clicked;
+} UIItemResult;
+
 static UIContextState global_ctx;
 static int global_ctx_target = -1;
+
+void ui_list_reset(UIListState *s)
+{
+        s->target_scroll = 0;
+        s->current_scroll = 0;
+        s->scroll_velocity = 0;
+        s->drag_offset = 0;
+        s->dragging_scroll = false;
+        s->selected_idx = -1;
+        s->clicked_on_item = false;
+
+        s->last_nav_key = 0;
+        s->nav_key_streak = 0;
+        s->last_nav_time = 0;
+}
 
 void ui_list_set_mode(UIListState *s, const UIListParams *p, UIListMode mode)
 {
@@ -472,23 +558,107 @@ void ui_list_set_mode(UIListState *s, const UIListParams *p, UIListMode mode)
 
 void ui_list_begin(UIListState *s, const UIListParams *p, int key)
 {
+        s->p = *p;
         s->clicked_on_item = false;
 
-        int cols = (s->mode == UI_MODE_LIST) ? 1 : ((p->w - 1) / p->cell_w > 0 ? (p->w - 1) / p->cell_w : 1);
-        int c_h = (s->mode == UI_MODE_LIST) ? 1 : p->cell_h;
-        int rows = (p->item_count + cols - 1) / cols;
+        int cols = (s->mode == UI_MODE_LIST) ? 1 : ((s->p.w - 1) / s->p.cell_w > 0 ? (s->p.w - 1) / s->p.cell_w : 1);
+        int c_h = (s->mode == UI_MODE_LIST) ? 1 : s->p.cell_h;
+        int rows = (s->p.item_count + cols - 1) / cols;
+        int rows_per_page = s->p.h / c_h > 0 ? s->p.h / c_h : 1;
+        int items_per_page = rows_per_page * cols;
+
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        long long now_ms = (long long)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+
+        if (key == KEY_UP || key == KEY_DOWN || key == KEY_LEFT || key == KEY_RIGHT)
+        {
+                if (key == s->last_nav_key && (now_ms - s->last_nav_time) < 400)
+                {
+                        s->nav_key_streak++;
+                }
+                else
+                {
+                        s->last_nav_key = key;
+                        s->nav_key_streak = 1;
+                }
+                s->last_nav_time = now_ms;
+        }
+        else if (key != 0)
+        {
+                s->last_nav_key = 0;
+                s->nav_key_streak = 0;
+        }
+
+        int step = 1;
+        if (s->nav_key_streak > 30)
+                step = (s->mode == UI_MODE_LIST) ? 25 : 8;
+        else if (s->nav_key_streak > 15)
+                step = (s->mode == UI_MODE_LIST) ? 10 : 4;
+        else if (s->nav_key_streak > 5)
+                step = (s->mode == UI_MODE_LIST) ? 3 : 2;
 
         int old_idx = s->selected_idx;
-        if (key == KEY_RIGHT && s->selected_idx < p->item_count - 1)
-                s->selected_idx++;
-        if (key == KEY_LEFT && s->selected_idx > 0)
-                s->selected_idx--;
-        if (key == KEY_DOWN && s->selected_idx + cols < p->item_count)
-                s->selected_idx += cols;
-        if (key == KEY_UP && s->selected_idx >= cols)
-                s->selected_idx -= cols;
-        if (s->selected_idx == -1 && p->item_count > 0 && (key == KEY_RIGHT || key == KEY_LEFT || key == KEY_DOWN || key == KEY_UP))
+
+        if (s->selected_idx == -1 && s->p.item_count > 0 &&
+            (key >= KEY_UP && key <= KEY_SHIFT_PAGE_DOWN))
+        {
                 s->selected_idx = 0;
+        }
+        else if (s->selected_idx >= 0)
+        {
+                if (key == KEY_RIGHT)
+                {
+                        s->selected_idx += step;
+                        if (s->selected_idx >= s->p.item_count)
+                                s->selected_idx = s->p.item_count - 1;
+                }
+                if (key == KEY_LEFT)
+                {
+                        s->selected_idx -= step;
+                        if (s->selected_idx < 0)
+                                s->selected_idx = 0;
+                }
+                if (key == KEY_DOWN)
+                {
+                        s->selected_idx += cols * step;
+                        if (s->selected_idx >= s->p.item_count)
+                                s->selected_idx = s->p.item_count - 1;
+                }
+                if (key == KEY_UP)
+                {
+                        s->selected_idx -= cols * step;
+                        if (s->selected_idx < 0)
+                                s->selected_idx = old_idx % cols;
+                }
+                if (key == KEY_PAGE_DOWN)
+                {
+                        s->selected_idx += items_per_page;
+                        if (s->selected_idx >= s->p.item_count)
+                                s->selected_idx = s->p.item_count - 1;
+                }
+                if (key == KEY_PAGE_UP)
+                {
+                        s->selected_idx -= items_per_page;
+                        if (s->selected_idx < 0)
+                                s->selected_idx = old_idx % cols;
+                }
+                if (key == KEY_END)
+                {
+                        if (s->selected_idx == s->p.item_count - 1)
+                                s->selected_idx = 0;
+                        else
+                                s->selected_idx = s->p.item_count - 1;
+                }
+                if (key == KEY_HOME || key == KEY_SHIFT_PAGE_UP)
+                {
+                        s->selected_idx = 0;
+                }
+                if (key == KEY_SHIFT_PAGE_DOWN)
+                {
+                        s->selected_idx = s->p.item_count - 1;
+                }
+        }
 
         if (old_idx != s->selected_idx && s->selected_idx >= 0)
         {
@@ -496,19 +666,19 @@ void ui_list_begin(UIListState *s, const UIListParams *p, int key)
                 int item_top = row * c_h;
                 if (item_top < (int)s->target_scroll)
                         s->target_scroll = (float)item_top;
-                else if (item_top + c_h > (int)s->target_scroll + p->h)
-                        s->target_scroll = (float)(item_top + c_h - p->h);
+                else if (item_top + c_h > (int)s->target_scroll + s->p.h)
+                        s->target_scroll = (float)(item_top + c_h - s->p.h);
         }
 
-        int max_scroll = rows * c_h > p->h ? rows * c_h - p->h : 0;
-        int thumb_h = p->h * p->h / (rows * c_h > p->h ? rows * c_h : p->h);
+        int max_scroll = rows * c_h > s->p.h ? rows * c_h - s->p.h : 0;
+        int thumb_h = s->p.h * s->p.h / (rows * c_h > s->p.h ? rows * c_h : s->p.h);
         if (thumb_h < 1)
                 thumb_h = 1;
 
-        if (term_mouse.clicked && term_mouse.x == p->x + p->w - 1 && term_mouse.y >= p->y && term_mouse.y < p->y + p->h)
+        if (term_mouse.clicked && term_mouse.x == s->p.x + s->p.w - 1 && term_mouse.y >= s->p.y && term_mouse.y < s->p.y + s->p.h)
         {
                 s->dragging_scroll = true;
-                int thumb_top = p->y + (max_scroll > 0 ? (int)((s->current_scroll / max_scroll) * (p->h - thumb_h)) : 0);
+                int thumb_top = s->p.y + (max_scroll > 0 ? (int)((s->current_scroll / max_scroll) * (s->p.h - thumb_h)) : 0);
                 if (term_mouse.y >= thumb_top && term_mouse.y < thumb_top + thumb_h)
                         s->drag_offset = (float)(term_mouse.y - thumb_top);
                 else
@@ -520,7 +690,7 @@ void ui_list_begin(UIListState *s, const UIListParams *p, int key)
 
         if (s->dragging_scroll && max_scroll > 0)
         {
-                float cr = (float)(term_mouse.y - p->y - s->drag_offset) / (p->h - thumb_h > 0 ? p->h - thumb_h : 1);
+                float cr = (float)(term_mouse.y - s->p.y - s->drag_offset) / (s->p.h - thumb_h > 0 ? s->p.h - thumb_h : 1);
                 s->target_scroll = s->current_scroll = (cr < 0 ? 0 : cr > 1 ? 1
                                                                             : cr) *
                                                        max_scroll;
@@ -581,30 +751,39 @@ void ui_list_begin(UIListState *s, const UIListParams *p, int key)
         }
 }
 
-bool ui_list_do_item(UIListState *s, const UIListParams *p, int index, int *out_x, int *out_y, bool *is_hovered, bool *is_pressed)
+bool ui_list_do_item(UIListState *s, int index, UIItemResult *res)
 {
-        int cols = (s->mode == UI_MODE_LIST) ? 1 : ((p->w - 1) / p->cell_w > 0 ? (p->w - 1) / p->cell_w : 1);
-        int c_w = (s->mode == UI_MODE_LIST) ? p->w - 1 : p->cell_w;
-        int c_h = (s->mode == UI_MODE_LIST) ? 1 : p->cell_h;
+        int cols = (s->mode == UI_MODE_LIST) ? 1 : ((s->p.w - 1) / s->p.cell_w > 0 ? (s->p.w - 1) / s->p.cell_w : 1);
+        int c_w = (s->mode == UI_MODE_LIST) ? s->p.w - 1 : s->p.cell_w;
+        int c_h = (s->mode == UI_MODE_LIST) ? 1 : s->p.cell_h;
 
-        int screen_x = p->x + (index % cols) * c_w;
-        int screen_y = p->y + (index / cols * c_h) - (int)(s->current_scroll + 0.5f);
+        int screen_x = s->p.x + (index % cols) * c_w;
+        int screen_y = s->p.y + (index / cols * c_h) - (int)(s->current_scroll + 0.5f);
 
-        if (screen_y + c_h <= p->y || screen_y >= p->y + p->h)
+        if (screen_y + c_h <= s->p.y || screen_y >= s->p.y + s->p.h)
                 return false;
 
-        *out_x = screen_x;
-        *out_y = screen_y;
+        res->x = screen_x;
+        res->y = screen_y;
+        res->w = c_w;
+        res->h = c_h;
 
         bool is_ctx_list = (s == &global_ctx.list);
 
-        *is_hovered = ((!global_ctx.active || is_ctx_list) && !s->dragging_scroll &&
-                       term_mouse.x >= screen_x && term_mouse.x < screen_x + c_w &&
-                       term_mouse.y >= screen_y && term_mouse.y < screen_y + c_h &&
-                       term_mouse.y >= p->y && term_mouse.y < p->y + p->h && term_mouse.x < p->x + p->w - 1);
-        *is_pressed = (*is_hovered && term_mouse.left);
+        bool over_ctx_menu = global_ctx.active && !is_ctx_list &&
+                             term_mouse.x >= global_ctx.x && term_mouse.x < global_ctx.x + global_ctx.w &&
+                             term_mouse.y >= global_ctx.y && term_mouse.y < global_ctx.y + global_ctx.h;
 
-        if (*is_hovered && (term_mouse.clicked || term_mouse.right_clicked))
+        res->hovered = (!over_ctx_menu && !s->dragging_scroll &&
+                        term_mouse.x >= screen_x && term_mouse.x < screen_x + c_w &&
+                        term_mouse.y >= screen_y && term_mouse.y < screen_y + c_h &&
+                        term_mouse.y >= s->p.y && term_mouse.y < s->p.y + s->p.h && term_mouse.x < s->p.x + s->p.w - 1);
+
+        res->pressed = (res->hovered && term_mouse.left);
+        res->clicked = (res->hovered && term_mouse.clicked);
+        res->right_clicked = (res->hovered && term_mouse.right_clicked);
+
+        if (res->clicked || res->right_clicked)
         {
                 s->selected_idx = index;
                 s->clicked_on_item = true;
@@ -612,17 +791,17 @@ bool ui_list_do_item(UIListState *s, const UIListParams *p, int index, int *out_
         return true;
 }
 
-void ui_list_end(UIListState *s, const UIListParams *p)
+void ui_list_end(UIListState *s)
 {
-        int cols = (s->mode == UI_MODE_LIST) ? 1 : ((p->w - 1) / p->cell_w > 0 ? (p->w - 1) / p->cell_w : 1);
-        int c_h = (s->mode == UI_MODE_LIST) ? 1 : p->cell_h;
-        int rows = (p->item_count + cols - 1) / cols;
-        int max_scroll = rows * c_h > p->h ? rows * c_h - p->h : 0;
+        int cols = (s->mode == UI_MODE_LIST) ? 1 : ((s->p.w - 1) / s->p.cell_w > 0 ? (s->p.w - 1) / s->p.cell_w : 1);
+        int c_h = (s->mode == UI_MODE_LIST) ? 1 : s->p.cell_h;
+        int rows = (s->p.item_count + cols - 1) / cols;
+        int max_scroll = rows * c_h > s->p.h ? rows * c_h - s->p.h : 0;
 
         if (term_mouse.clicked && !s->clicked_on_item && !s->dragging_scroll && !global_ctx.active)
         {
-                if (term_mouse.x >= p->x && term_mouse.x < p->x + p->w - 1 &&
-                    term_mouse.y >= p->y && term_mouse.y < p->y + p->h)
+                if (term_mouse.x >= s->p.x && term_mouse.x < s->p.x + s->p.w - 1 &&
+                    term_mouse.y >= s->p.y && term_mouse.y < s->p.y + s->p.h)
                 {
                         s->selected_idx = -1;
                 }
@@ -630,21 +809,29 @@ void ui_list_end(UIListState *s, const UIListParams *p)
 
         if (max_scroll > 0)
         {
-                int thumb_h = p->h * p->h / (rows * c_h);
+                int thumb_h = s->p.h * s->p.h / (rows * c_h);
                 if (thumb_h < 1)
                         thumb_h = 1;
-                ui_rect(p->x + p->w - 1, p->y, 1, p->h, p->scrollbar_bg);
+                ui_rect(s->p.x + s->p.w - 1, s->p.y, 1, s->p.h, s->p.scrollbar_bg);
 
-                Color thumb_col = s->dragging_scroll ? (Color){255, 255, 255} : p->scrollbar_fg;
-                ui_rect(p->x + p->w - 1, p->y + (int)((s->current_scroll / max_scroll) * (p->h - thumb_h)), 1, thumb_h, thumb_col);
+                Color thumb_col = s->dragging_scroll ? (Color){255, 255, 255} : s->p.scrollbar_fg;
+                ui_rect(s->p.x + s->p.w - 1, s->p.y + (int)((s->current_scroll / max_scroll) * (s->p.h - thumb_h)), 1, thumb_h, thumb_col);
         }
 }
 
-void ui_context_open(int x, int y, int target_idx)
+bool ui_list_is_animating(UIListState *s)
+{
+        if (s->dragging_scroll)
+                return true;
+        float diff = s->target_scroll - s->current_scroll;
+        return (diff > 0.01f || diff < -0.01f || s->scroll_velocity > 0.01f || s->scroll_velocity < -0.01f);
+}
+
+void ui_context_open(int target_idx)
 {
         global_ctx.active = true;
-        global_ctx.x = x;
-        global_ctx.y = y;
+        global_ctx.x = term_mouse.x;
+        global_ctx.y = term_mouse.y;
         global_ctx.w = 0;
         global_ctx_target = target_idx;
 
@@ -654,6 +841,8 @@ void ui_context_open(int x, int y, int target_idx)
         global_ctx.list.dragging_scroll = false;
         global_ctx.list.selected_idx = -1;
         global_ctx.list.mode = UI_MODE_LIST;
+
+        term_mouse.right_clicked = false;
 }
 
 int ui_context_target(void)
@@ -681,8 +870,15 @@ bool ui_context_do(const char **items, int count, int *out_idx)
                         if (len > max_w)
                                 max_w = len;
                 }
-                global_ctx.w = max_w + 3; // +2 for padding, +1 for scrollbar
+                global_ctx.w = max_w + 3;
                 global_ctx.h = count;
+
+                if (global_ctx.x + global_ctx.w > term_width)
+                {
+                        global_ctx.x = term_width - global_ctx.w;
+                        if (global_ctx.x < 0)
+                                global_ctx.x = 0;
+                }
 
                 if (global_ctx.y + global_ctx.h > term_height)
                 {
@@ -702,16 +898,7 @@ bool ui_context_do(const char **items, int count, int *out_idx)
         ui_rect(global_ctx.x, global_ctx.y, global_ctx.w, global_ctx.h, (Color){15, 15, 15});
 
         UIListParams params = {
-            .x = global_ctx.x,
-            .y = global_ctx.y,
-            .w = global_ctx.w,
-            .h = global_ctx.h,
-            .item_count = count,
-            .cell_w = global_ctx.w,
-            .cell_h = 1,
-            .bg = (Color){15, 15, 15},
-            .scrollbar_bg = (Color){25, 25, 25},
-            .scrollbar_fg = (Color){100, 100, 100}};
+            .x = global_ctx.x, .y = global_ctx.y, .w = global_ctx.w, .h = global_ctx.h, .item_count = count, .cell_w = global_ctx.w, .cell_h = 1, .bg = (Color){15, 15, 15}, .scrollbar_bg = (Color){25, 25, 25}, .scrollbar_fg = (Color){100, 100, 100}};
 
         ui_list_begin(&global_ctx.list, &params, 0);
 
@@ -719,19 +906,19 @@ bool ui_context_do(const char **items, int count, int *out_idx)
 
         for (int i = 0; i < count; i++)
         {
-                int sx, sy;
-                bool hovered, pressed;
-                if (ui_list_do_item(&global_ctx.list, &params, i, &sx, &sy, &hovered, &pressed))
+                UIItemResult item;
+
+                if (ui_list_do_item(&global_ctx.list, i, &item))
                 {
-                        Color bg = (hovered || global_ctx.list.selected_idx == i) ? (Color){35, 35, 35} : (Color){15, 15, 15};
-                        if (pressed)
+                        Color bg = (item.hovered || global_ctx.list.selected_idx == i) ? (Color){35, 35, 35} : (Color){15, 15, 15};
+                        if (item.pressed)
                                 bg = (Color){60, 60, 60};
 
                         int item_w = params.w - 1;
-                        ui_rect(sx, sy, item_w, 1, bg);
-                        ui_text(sx + 1, sy, items[i], (Color){255, 255, 255}, bg, false, false);
+                        ui_rect(item.x, item.y, item_w, 1, bg);
+                        ui_text(item.x + 1, item.y, items[i], (Color){255, 255, 255}, bg, false, false);
 
-                        if (hovered && term_mouse.clicked)
+                        if (item.clicked)
                         {
                                 *out_idx = i;
                                 action_taken = true;
@@ -739,9 +926,9 @@ bool ui_context_do(const char **items, int count, int *out_idx)
                 }
         }
 
-        ui_list_end(&global_ctx.list, &params);
+        ui_list_end(&global_ctx.list);
 
-        if (term_mouse.clicked && !action_taken && !global_ctx.list.dragging_scroll)
+        if ((term_mouse.clicked || term_mouse.right_clicked) && !action_taken && !global_ctx.list.dragging_scroll)
         {
                 if (!(term_mouse.x >= global_ctx.x && term_mouse.x < global_ctx.x + params.w &&
                       term_mouse.y >= global_ctx.y && term_mouse.y < global_ctx.y + params.h))

@@ -26,7 +26,15 @@ typedef struct
 int cmp_entries(const void *a, const void *b)
 {
         FileEntry *ea = (FileEntry *)a, *eb = (FileEntry *)b;
-        return ea->is_dir != eb->is_dir ? eb->is_dir - ea->is_dir : strcmp(ea->name, eb->name);
+        if (ea->is_dir != eb->is_dir)
+                return eb->is_dir - ea->is_dir;
+
+        if (!strcmp(ea->name, ".."))
+                return -1;
+        if (!strcmp(eb->name, ".."))
+                return 1;
+
+        return strcmp(ea->name, eb->name);
 }
 
 void app_load_dir(AppState *app, const char *path)
@@ -42,8 +50,7 @@ void app_load_dir(AppState *app, const char *path)
         getcwd(app->cwd, sizeof(app->cwd)) orelse return;
 
         app->count = 0;
-        app->list.target_scroll = app->list.current_scroll = app->list.dragging_scroll = 0;
-        app->list.selected_idx = -1;
+        ui_list_reset(&app->list);
 
         for (;;)
         {
@@ -53,8 +60,9 @@ void app_load_dir(AppState *app, const char *path)
 
                 if (app->count >= app->capacity)
                 {
-                        app->capacity = app->capacity ? app->capacity * 2 : 256;
-                        void *tmp = realloc(app->entries, app->capacity * sizeof(FileEntry)) orelse return;
+                        int new_cap = app->capacity ? app->capacity * 2 : 256;
+                        void *tmp = realloc(app->entries, new_cap * sizeof(FileEntry)) orelse return;
+                        app->capacity = new_cap;
                         app->entries = tmp;
                 }
 
@@ -65,16 +73,19 @@ void app_load_dir(AppState *app, const char *path)
                 app->entries[app->count++].is_dir = S_ISDIR(st.st_mode);
         }
         qsort(app->entries, app->count, sizeof(FileEntry), cmp_entries);
+
+        if (app->count > 0)
+                app->list.selected_idx = 0;
 }
 
-void draw_item_grid(AppState *app, int i, int sx, int sy, bool hovered, bool pressed, int cell_w, int cell_h)
+void draw_item_grid(AppState *app, int i, const UIItemResult *item)
 {
         bool is_sel = (i == app->list.selected_idx);
-        Color item_bg = pressed ? (Color){130, 130, 130} : ((hovered || is_sel) ? clr_hover : clr_bg);
+        Color item_bg = item->pressed ? (Color){130, 130, 130} : ((item->hovered || is_sel) ? clr_hover : clr_bg);
         Color icon_fg = app->entries[i].is_dir ? clr_folder : clr_text;
 
-        if (hovered || is_sel)
-                ui_rect(sx + 1, sy, cell_w - 2, cell_h, item_bg);
+        if (item->hovered || is_sel)
+                ui_rect(item->x + 1, item->y, item->w - 2, item->h, item_bg);
 
         raw char disp[256];
         strcpy(disp, app->entries[i].name);
@@ -95,15 +106,15 @@ void draw_item_grid(AppState *app, int i, int sx, int sy, bool hovered, bool pre
         const char *icon_dir[] = {" ┌──┐___ ", " │  └───│ ", " │      │ ", " └──────┘ "};
         const char *icon_file[] = {"  ┌──┐_ ", "  │  └─│", "  │    │", "  └────┘"};
         const char **icon = app->entries[i].is_dir ? icon_dir : icon_file;
-        int y_off = pressed ? 1 : 0;
+        int y_off = item->pressed ? 1 : 0;
 
         for (int j = 0; j < 4; j++)
-                ui_text(sx + 2, sy + j + y_off, icon[j], icon_fg, item_bg, pressed, false);
+                ui_text(item->x + 2, item->y + j + y_off, icon[j], icon_fg, item_bg, item->pressed, false);
         if (elen > 0)
-                ui_text(sx + 5, sy + 2 + y_off, ext, icon_fg, item_bg, pressed, true);
+                ui_text(item->x + 5, item->y + 2 + y_off, ext, icon_fg, item_bg, item->pressed, true);
 
         char l1[16], l2[16];
-        int mw = cell_w - 2, len = strlen(disp);
+        int mw = item->w - 2, len = strlen(disp);
         strncpy(l1, disp, mw);
         if (len > mw)
         {
@@ -111,25 +122,25 @@ void draw_item_grid(AppState *app, int i, int sx, int sy, bool hovered, bool pre
                 if (len > mw * 2)
                         strcpy(l2 + mw - 2, "..");
         }
-        ui_text_centered(sx + 1, sy + 4 + y_off, mw, l1, clr_text, item_bg, pressed, false);
+        ui_text_centered(item->x + 1, item->y + 4 + y_off, mw, l1, clr_text, item_bg, item->pressed, false);
         if (l2[0])
-                ui_text_centered(sx + 1, sy + 5 + y_off, mw, l2, clr_text, item_bg, pressed, false);
+                ui_text_centered(item->x + 1, item->y + 5 + y_off, mw, l2, clr_text, item_bg, item->pressed, false);
 }
 
-void draw_item_list(AppState *app, int i, int sx, int sy, bool hovered, bool pressed, int item_w)
+void draw_item_list(AppState *app, int i, const UIItemResult *item)
 {
         bool is_sel = (i == app->list.selected_idx);
-        Color item_bg = pressed ? (Color){130, 130, 130} : ((hovered || is_sel) ? clr_hover : clr_bg);
+        Color item_bg = item->pressed ? (Color){130, 130, 130} : ((item->hovered || is_sel) ? clr_hover : clr_bg);
         Color icon_fg = app->entries[i].is_dir ? clr_folder : clr_text;
 
-        ui_rect(sx, sy, item_w, 1, item_bg);
-        ui_text(sx + 1, sy, app->entries[i].is_dir ? "[DIR]" : "[FILE]", icon_fg, item_bg, false, false);
+        ui_rect(item->x, item->y, item->w, 1, item_bg);
+        ui_text(item->x + 1, item->y, app->entries[i].is_dir ? "[DIR]" : "[FILE]", icon_fg, item_bg, false, false);
 
         raw char l[256];
-        int copy_len = item_w - 9 > 255 ? 255 : item_w - 9;
+        int copy_len = item->w - 9 > 255 ? 255 : item->w - 9;
         strncpy(l, app->entries[i].name, copy_len);
         l[copy_len] = '\0';
-        ui_text(sx + 8, sy, l, clr_text, item_bg, false, false);
+        ui_text(item->x + 8, item->y, l, clr_text, item_bg, false, false);
 
         raw char size_str[32];
         if (!app->entries[i].is_dir)
@@ -142,7 +153,7 @@ void draw_item_list(AppState *app, int i, int sx, int sy, bool hovered, bool pre
                         snprintf(size_str, 32, "%lld MB", (long long)(app->entries[i].size / (1024 * 1024)));
                 else
                         snprintf(size_str, 32, "%lld GB", (long long)(app->entries[i].size / (1024 * 1024 * 1024)));
-                ui_text(sx + item_w - 10, sy, size_str, clr_bar, item_bg, false, false);
+                ui_text(item->x + item->w - 10, item->y, size_str, clr_bar, item_bg, false, false);
         }
 }
 
@@ -175,8 +186,7 @@ int main(void)
 
         while (!app.quit)
         {
-                float diff = app.list.target_scroll - app.list.current_scroll;
-                int timeout = (!app.list.dragging_scroll && (diff > 0.01f || diff < -0.01f) || app.list.dragging_scroll) ? 16 : 1000;
+                int timeout = ui_list_is_animating(&app.list) ? 16 : 1000;
                 if (first_frame)
                 {
                         timeout = 0;
@@ -197,30 +207,28 @@ int main(void)
 
                 for (int i = 0; i < app.count; i++)
                 {
-                        int sx, sy;
-                        bool hovered, pressed;
+                        UIItemResult item;
 
-                        if (ui_list_do_item(&app.list, &params, i, &sx, &sy, &hovered, &pressed))
-                        {
-                                if (app.list.mode == UI_MODE_GRID)
-                                        draw_item_grid(&app, i, sx, sy, hovered, pressed, params.cell_w, params.cell_h);
-                                else
-                                        draw_item_list(&app, i, sx, sy, hovered, pressed, params.w - 1);
+                        ui_list_do_item(&app.list, i, &item) orelse continue;
 
-                                if (hovered && term_mouse.clicked && app.entries[i].is_dir)
-                                        strcpy(app.next_dir, app.entries[i].name);
-                        }
+                        if (app.list.mode == UI_MODE_GRID)
+                                draw_item_grid(&app, i, &item);
+                        else
+                                draw_item_list(&app, i, &item);
 
-                        if (hovered && term_mouse.right_clicked)
-                                ui_context_open(term_mouse.x, term_mouse.y, i);
+                        if (item.clicked && app.entries[i].is_dir)
+                                strcpy(app.next_dir, app.entries[i].name);
+
+                        if (item.right_clicked)
+                                ui_context_open(i);
                 }
 
-                ui_list_end(&app.list, &params);
+                ui_list_end(&app.list);
 
                 ui_rect(0, 0, term_width, params.y, clr_bg);
                 ui_rect(0, 0, term_width, 1, clr_bar);
                 raw char header[PATH_MAX + 20];
-                snprintf(header, sizeof(header), " Directory: %s ", app.cwd);
+                snprintf(header, sizeof(header), "%s ", app.cwd);
                 ui_text(1, 0, header, (Color){0, 0, 0}, clr_bar, false, false);
 
                 ui_rect(0, term_height - 1, term_width, 1, clr_bar);
@@ -235,20 +243,17 @@ int main(void)
 
                         switch (selected_action)
                         {
-                        case 0: // Open
+                        case 0:
                                 if (target->is_dir)
                                         strcpy(app.next_dir, target->name);
                                 break;
-                        case 1: // Rename
-                                // TODO: trigger a text input primitive
+                        case 1:
                                 break;
-                        case 2: // Delete
-                                // TODO: unlink() or rmdir()
+                        case 2:
                                 break;
                         }
                 }
 
-                ui_cursor();
                 ui_end();
 
                 if (app.next_dir[0] != '\0')
