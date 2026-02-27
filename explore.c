@@ -20,8 +20,6 @@ typedef struct
         char next_dir[PATH_MAX];
         UIListState list;
         bool quit;
-        UIContextState context;
-        int target_idx;
 } AppState;
 
 int cmp_entries(const void *a, const void *b)
@@ -125,8 +123,10 @@ void draw_item_list(AppState *app, int i, int sx, int sy, bool hovered, bool pre
         ui_rect(sx, sy, item_w, 1, item_bg);
         ui_text(sx + 1, sy, app->entries[i].is_dir ? "[DIR]" : "[FILE]", icon_fg, item_bg, false, false);
 
-        char l[256];
-        strncpy(l, app->entries[i].name, item_w - 9);
+        raw char l[256];
+        int copy_len = item_w - 9 > 255 ? 255 : item_w - 9;
+        strncpy(l, app->entries[i].name, copy_len);
+        l[copy_len] = '\0';
         ui_text(sx + 8, sy, l, clr_text, item_bg, false, false);
 }
 
@@ -179,8 +179,6 @@ int main(void)
 
                 ui_list_begin(&app.list, &params, key);
 
-                bool item_was_clicked = false;
-
                 for (int i = 0; i < app.count; i++)
                 {
                         int sx, sy;
@@ -188,47 +186,20 @@ int main(void)
 
                         if (ui_list_do_item(&app.list, &params, i, &sx, &sy, &hovered, &pressed))
                         {
-                                if (app.context.active)
-                                {
-                                        pressed = false;
-                                        if (app.context.w > 0 &&
-                                            term_mouse.x >= app.context.x && term_mouse.x < app.context.x + app.context.w &&
-                                            term_mouse.y >= app.context.y && term_mouse.y < app.context.y + app.context.h)
-                                        {
-                                                hovered = false;
-                                        }
-                                }
-
                                 if (app.list.mode == UI_MODE_GRID)
-                                {
                                         draw_item_grid(&app, i, sx, sy, hovered, pressed, params.cell_w, params.cell_h);
-                                }
                                 else
-                                {
                                         draw_item_list(&app, i, sx, sy, hovered, pressed, params.w - 1);
-                                }
 
-                                if (hovered && term_mouse.clicked && !app.context.active)
-                                {
-                                        item_was_clicked = true;
-                                        if (app.entries[i].is_dir)
-                                                strcpy(app.next_dir, app.entries[i].name);
-                                }
+                                if (hovered && term_mouse.clicked && app.entries[i].is_dir)
+                                        strcpy(app.next_dir, app.entries[i].name);
                         }
 
                         if (hovered && term_mouse.right_clicked)
-                        {
-                                app.context.active = true;
-                                app.context.x = term_mouse.x;
-                                app.context.y = term_mouse.y;
-                                app.target_idx = i;
-                        }
+                                ui_context_open(term_mouse.x, term_mouse.y, i);
                 }
 
                 ui_list_end(&app.list, &params);
-
-                if (term_mouse.clicked && !item_was_clicked && !app.list.dragging_scroll && !app.context.active)
-                        app.list.selected_idx = -1;
 
                 ui_rect(0, 0, term_width, params.y, clr_bg);
                 ui_rect(0, 0, term_width, 1, clr_bar);
@@ -242,9 +213,9 @@ int main(void)
                 const char *menu_options[] = {"Open", "Rename", "Delete", "Cancel"};
                 int selected_action = -1;
 
-                if (ui_context_menu(&app.context, menu_options, 4, &selected_action))
+                if (ui_context_do(menu_options, 4, &selected_action))
                 {
-                        FileEntry *target = &app.entries[app.target_idx];
+                        FileEntry *target = &app.entries[ui_context_target()];
 
                         switch (selected_action)
                         {
