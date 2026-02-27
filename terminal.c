@@ -295,100 +295,107 @@ int term_poll(int timeout_ms)
                 term_mouse.has_sub = true;
         }
 
-        raw char buf[64];
-        int n = read(STDIN_FILENO, buf, sizeof(buf));
-        for (int i = 0; i < n; i++)
+        while (1)
         {
-                if (buf[i] == '\033')
+                raw char buf[4096];
+                int n = read(STDIN_FILENO, buf, sizeof(buf));
+                if (n <= 0)
+                        break;
+
+                for (int i = 0; i < n; i++)
                 {
-                        if (i + 2 < n && buf[i + 2] == '<')
+                        if (buf[i] == '\033')
                         {
-                                int b, x, y, offset;
-                                char m;
-                                if (sscanf(buf + i + 3, "%d;%d;%d%c%n", &b, &x, &y, &m, &offset) == 4)
+                                if (i + 2 < n && buf[i + 2] == '<')
                                 {
-                                        term_mouse.hide_cursor = true;
-                                        term_mouse.x = x - 1;
-                                        term_mouse.y = y - 1;
-                                        term_mouse.has_sub = false;
-                                        bool d = (m == 'M');
-                                        if (b == 0 || b == 32)
-                                                term_mouse.left = d;
-                                        if (b == 2 || b == 34)
-                                                term_mouse.right = d;
-                                        if (b == 64 && d)
-                                                term_mouse.wheel--;
-                                        if (b == 65 && d)
-                                                term_mouse.wheel++;
-                                        i += 3 + offset;
-                                        continue;
+                                        int b, x, y, offset;
+                                        char m;
+                                        if (sscanf(buf + i + 3, "%d;%d;%d%c%n", &b, &x, &y, &m, &offset) == 4)
+                                        {
+                                                term_mouse.hide_cursor = true;
+                                                term_mouse.x = x - 1;
+                                                term_mouse.y = y - 1;
+                                                term_mouse.has_sub = false;
+                                                bool d = (m == 'M');
+                                                if (b == 0 || b == 32)
+                                                        term_mouse.left = d;
+                                                if (b == 2 || b == 34)
+                                                        term_mouse.right = d;
+                                                if (b == 64 && d)
+                                                        term_mouse.wheel--;
+                                                if (b == 65 && d)
+                                                        term_mouse.wheel++;
+                                                i += 3 + offset;
+                                                continue;
+                                        }
+                                }
+                                else if (i + 5 < n && buf[i + 5] == '~' && buf[i + 3] == ';' && buf[i + 4] == '2')
+                                {
+                                        if (buf[i + 2] == '5')
+                                                key = KEY_SHIFT_PAGE_UP;
+                                        else if (buf[i + 2] == '6')
+                                                key = KEY_SHIFT_PAGE_DOWN;
+                                        if (key)
+                                        {
+                                                i += 5;
+                                                continue;
+                                        }
+                                }
+                                else if (i + 3 < n && buf[i + 3] == '~')
+                                {
+                                        if (buf[i + 2] == '5')
+                                                key = KEY_PAGE_UP;
+                                        else if (buf[i + 2] == '6')
+                                                key = KEY_PAGE_DOWN;
+                                        else if (buf[i + 2] == '4' || buf[i + 2] == '8')
+                                                key = KEY_END;
+                                        else if (buf[i + 2] == '1' || buf[i + 2] == '7')
+                                                key = KEY_HOME;
+                                        if (key)
+                                        {
+                                                i += 3;
+                                                continue;
+                                        }
+                                }
+                                else if (i + 2 < n && buf[i + 1] == 'O')
+                                {
+                                        if (buf[i + 2] == 'F')
+                                                key = KEY_END;
+                                        else if (buf[i + 2] == 'H')
+                                                key = KEY_HOME;
+                                        if (key)
+                                        {
+                                                i += 2;
+                                                continue;
+                                        }
+                                }
+                                else if (i + 2 < n)
+                                {
+                                        if (buf[i + 2] == 'A')
+                                                key = KEY_UP;
+                                        else if (buf[i + 2] == 'B')
+                                                key = KEY_DOWN;
+                                        else if (buf[i + 2] == 'C')
+                                                key = KEY_RIGHT;
+                                        else if (buf[i + 2] == 'D')
+                                                key = KEY_LEFT;
+                                        else if (buf[i + 2] == 'F')
+                                                key = KEY_END;
+                                        else if (buf[i + 2] == 'H')
+                                                key = KEY_HOME;
+                                        if (key)
+                                        {
+                                                i += 2;
+                                                continue;
+                                        }
                                 }
                         }
-                        else if (i + 5 < n && buf[i + 5] == '~' && buf[i + 3] == ';' && buf[i + 4] == '2')
-                        {
-                                if (buf[i + 2] == '5')
-                                        key = KEY_SHIFT_PAGE_UP;
-                                else if (buf[i + 2] == '6')
-                                        key = KEY_SHIFT_PAGE_DOWN;
-                                if (key)
-                                {
-                                        i += 5;
-                                        continue;
-                                }
-                        }
-                        else if (i + 3 < n && buf[i + 3] == '~')
-                        {
-                                if (buf[i + 2] == '5')
-                                        key = KEY_PAGE_UP;
-                                else if (buf[i + 2] == '6')
-                                        key = KEY_PAGE_DOWN;
-                                else if (buf[i + 2] == '4' || buf[i + 2] == '8')
-                                        key = KEY_END;
-                                else if (buf[i + 2] == '1' || buf[i + 2] == '7')
-                                        key = KEY_HOME;
-                                if (key)
-                                {
-                                        i += 3;
-                                        continue;
-                                }
-                        }
-                        else if (i + 2 < n && buf[i + 1] == 'O')
-                        {
-                                if (buf[i + 2] == 'F')
-                                        key = KEY_END;
-                                else if (buf[i + 2] == 'H')
-                                        key = KEY_HOME;
-                                if (key)
-                                {
-                                        i += 2;
-                                        continue;
-                                }
-                        }
-                        else if (i + 2 < n)
-                        {
-                                if (buf[i + 2] == 'A')
-                                        key = KEY_UP;
-                                else if (buf[i + 2] == 'B')
-                                        key = KEY_DOWN;
-                                else if (buf[i + 2] == 'C')
-                                        key = KEY_RIGHT;
-                                else if (buf[i + 2] == 'D')
-                                        key = KEY_LEFT;
-                                else if (buf[i + 2] == 'F')
-                                        key = KEY_END;
-                                else if (buf[i + 2] == 'H')
-                                        key = KEY_HOME;
-                                if (key)
-                                {
-                                        i += 2;
-                                        continue;
-                                }
-                        }
+                        if (!key)
+                                key = (buf[i] == '\r') ? KEY_ENTER : (buf[i] == 127 || buf[i] == 8) ? KEY_BACKSPACE
+                                                                                                    : buf[i];
                 }
-                if (!key)
-                        key = (buf[i] == '\r') ? KEY_ENTER : (buf[i] == 127 || buf[i] == 8) ? KEY_BACKSPACE
-                                                                                            : buf[i];
         }
+
         term_mouse.clicked = (!last_left && term_mouse.left);
         term_mouse.right_clicked = (!last_right && term_mouse.right);
         return key;
@@ -512,52 +519,38 @@ void ui_end(void)
         Color lfg = {-1, -1, -1}, lbg = {-1, -1, -1};
         bool lbold = false, linvert = false;
 
-        printf("\033[?2026h");
-
-        int last_y = -1, last_x = -1;
+        printf("\033[?2026h\033[H");
 
         for (int i = 0; i < term_height * term_width; i++)
         {
-                Cell *c = &canvas[i];
-                Cell *lc = &last_canvas[i];
+                if (i > 0 && i % term_width == 0)
+                        printf("\r\n");
 
-                if (cell_eq(c, lc))
-                        continue;
-
-                *lc = *c;
-
-                int y = i / term_width;
-                int x = i % term_width;
-
-                if (y != last_y || x != last_x + 1)
-                        printf("\033[%d;%dH", y + 1, x + 1);
-
-                last_y = y;
-                last_x = x;
-
-                if (c->bold != lbold)
+                Cell c = canvas[i];
+                if (c.bold != lbold)
                 {
-                        printf(c->bold ? "\033[1m" : "\033[22m");
-                        lbold = c->bold;
+                        printf(c.bold ? "\033[1m" : "\033[22m");
+                        lbold = c.bold;
                 }
-                if (c->invert != linvert)
+                if (c.invert != linvert)
                 {
-                        printf(c->invert ? "\033[7m" : "\033[27m");
-                        linvert = c->invert;
+                        printf(c.invert ? "\033[7m" : "\033[27m");
+                        linvert = c.invert;
                 }
-                if (!col_eq(c->bg, lbg))
+                if (!col_eq(c.bg, lbg))
                 {
-                        SET_COL(0, c->bg);
-                        lbg = c->bg;
+                        SET_COL(0, c.bg);
+                        lbg = c.bg;
                 }
-                if (!col_eq(c->fg, lfg))
+                if (!col_eq(c.fg, lfg))
                 {
-                        SET_COL(1, c->fg);
-                        lfg = c->fg;
+                        SET_COL(1, c.fg);
+                        lfg = c.fg;
                 }
-                fputs(c->ch, stdout);
+                fputs(c.ch, stdout);
         }
 
+        // Release the terminal frame
         printf("\x1b[0m\033[?2026l");
         fflush(stdout);
 }
@@ -742,10 +735,10 @@ void ui_list_begin(UIListState *s, const UIListParams *p, int key)
                 if (vel_dir == wheel_dir && ui_fabsf(s->scroll_velocity) > 0.05f)
                         base_power *= (2.5f + ui_fabsf(s->scroll_velocity) * 1.2f);
 
-                s->scroll_velocity += wheel_val * base_power * term_dt_scale;
+                s->scroll_velocity += wheel_val * base_power;
         }
 
-        s->target_scroll += s->scroll_velocity;
+        s->target_scroll += s->scroll_velocity * term_dt_scale;
         s->scroll_velocity *= friction;
 
         if (s != &global_ctx.list && (s->dragging_scroll || wheel_val != 0))
@@ -967,4 +960,35 @@ bool ui_context_do(const char **items, int count, int *out_idx)
         }
 
         return action_taken;
+}
+
+bool ui_text_input(int x, int y, int w, char *buf, size_t buf_size, int key, bool active)
+{
+        if (active)
+        {
+                if (key == KEY_BACKSPACE)
+                {
+                        int len = strlen(buf);
+                        if (len > 0)
+                                buf[len - 1] = '\0';
+                }
+                else if (key >= 32 && key <= 126)
+                {
+                        int len = strlen(buf);
+                        if (len < buf_size - 1)
+                        {
+                                buf[len] = (char)key;
+                                buf[len + 1] = '\0';
+                        }
+                }
+        }
+
+        Color bg = active ? (Color){45, 45, 45} : (Color){20, 20, 20};
+        ui_rect(x, y, w, 1, bg);
+
+        raw char disp[256];
+        snprintf(disp, sizeof(disp), "%s%s", buf, active ? "_" : "");
+        ui_text(x + 1, y, disp, (Color){255, 255, 255}, bg, false, false);
+
+        return (active && key == KEY_ENTER);
 }
