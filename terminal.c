@@ -74,6 +74,19 @@ typedef struct
         int last_nav_key;
         int nav_key_streak;
         long long last_nav_time;
+
+        int drag_idx;
+        bool is_dragging;
+        int drag_start_x, drag_start_y;
+        int drag_off_x, drag_off_y;
+        int drop_target_idx;
+        int action_drop_src;
+        int action_drop_dst;
+        int action_click_idx;
+
+        int kb_drag_idx;
+        bool is_kb_dragging;
+        float kb_drag_x, kb_drag_y;
 } UIListState;
 
 typedef struct
@@ -91,6 +104,8 @@ typedef struct
         bool pressed;
         bool clicked;
         bool right_clicked;
+        bool is_ghost;
+        bool is_drop_target;
 } UIItemResult;
 
 Mouse term_mouse;
@@ -582,6 +597,18 @@ void ui_list_reset(UIListState *s)
         s->last_nav_key = 0;
         s->nav_key_streak = 0;
         s->last_nav_time = 0;
+
+        s->drag_idx = -1;
+        s->is_dragging = false;
+        s->drop_target_idx = -1;
+        s->action_drop_src = -1;
+        s->action_drop_dst = -1;
+        s->action_click_idx = -1;
+
+        s->kb_drag_idx = -1;
+        s->is_kb_dragging = false;
+        s->kb_drag_x = 0;
+        s->kb_drag_y = 0;
 }
 
 void ui_list_set_mode(UIListState *s, const UIListParams *p, UIListMode mode)
@@ -598,11 +625,51 @@ void ui_list_set_mode(UIListState *s, const UIListParams *p, UIListMode mode)
                 s->current_scroll = s->target_scroll;
         }
 }
-
 void ui_list_begin(UIListState *s, const UIListParams *p, int key)
 {
         s->p = *p;
         s->clicked_on_item = false;
+
+        s->action_drop_src = -1;
+        s->action_drop_dst = -1;
+        s->action_click_idx = -1;
+        s->drop_target_idx = -1;
+
+        if (key == '\t')
+        {
+                if (!s->is_kb_dragging && s->selected_idx != -1)
+                {
+                        s->is_kb_dragging = true;
+                        s->kb_drag_idx = s->selected_idx;
+                        int cols = (s->mode == UI_MODE_LIST) ? 1 : ((s->p.w - 1) / s->p.cell_w > 0 ? (s->p.w - 1) / s->p.cell_w : 1);
+                        int c_w = (s->mode == UI_MODE_LIST) ? s->p.w - 1 : s->p.cell_w;
+                        int c_h = (s->mode == UI_MODE_LIST) ? 1 : s->p.cell_h;
+                        s->kb_drag_x = s->p.x + (s->selected_idx % cols) * c_w;
+                        s->kb_drag_y = s->p.y + (s->selected_idx / cols * c_h) - s->current_scroll;
+                }
+                else if (s->is_kb_dragging)
+                {
+                        s->is_kb_dragging = false;
+                        s->kb_drag_idx = -1;
+                }
+        }
+
+        if (key == KEY_ENTER && s->is_kb_dragging)
+        {
+                if (s->selected_idx != -1 && s->selected_idx != s->kb_drag_idx)
+                {
+                        s->action_drop_src = s->kb_drag_idx;
+                        s->action_drop_dst = s->selected_idx;
+                }
+                s->is_kb_dragging = false;
+                s->kb_drag_idx = -1;
+        }
+
+        if (key == KEY_ESC && s->is_kb_dragging)
+        {
+                s->is_kb_dragging = false;
+                s->kb_drag_idx = -1;
+        }
 
         int cols = (s->mode == UI_MODE_LIST) ? 1 : ((s->p.w - 1) / s->p.cell_w > 0 ? (s->p.w - 1) / s->p.cell_w : 1);
         int c_h = (s->mode == UI_MODE_LIST) ? 1 : s->p.cell_h;
@@ -790,8 +857,18 @@ void ui_list_begin(UIListState *s, const UIListParams *p, int key)
                 if (s->target_scroll - s->current_scroll > -0.05f && s->target_scroll - s->current_scroll < 0.05f)
                         s->current_scroll = s->target_scroll;
         }
-}
 
+        if (s->is_kb_dragging && s->selected_idx != -1)
+        {
+                int c_w = (s->mode == UI_MODE_LIST) ? s->p.w - 1 : s->p.cell_w;
+                float target_x = s->p.x + (s->selected_idx % cols) * c_w + (s->mode == UI_MODE_LIST ? 4 : c_w / 2);
+                float target_y = s->p.y + (s->selected_idx / cols * c_h) - s->current_scroll + (s->mode == UI_MODE_LIST ? 0 : c_h / 2);
+
+                float lerp = 1.0f - ui_powf(0.6f, term_dt_scale);
+                s->kb_drag_x += (target_x - s->kb_drag_x) * lerp;
+                s->kb_drag_y += (target_y - s->kb_drag_y) * lerp;
+        }
+}
 bool ui_list_do_item(UIListState *s, int index, UIItemResult *res)
 {
         int cols = (s->mode == UI_MODE_LIST) ? 1 : ((s->p.w - 1) / s->p.cell_w > 0 ? (s->p.w - 1) / s->p.cell_w : 1);
@@ -829,6 +906,24 @@ bool ui_list_do_item(UIListState *s, int index, UIItemResult *res)
                 s->selected_idx = index;
                 s->clicked_on_item = true;
         }
+
+        if (res->hovered && term_mouse.clicked && s->drag_idx == -1 && !s->dragging_scroll && !global_ctx.active)
+        {
+                s->drag_idx = index;
+                s->drag_start_x = term_mouse.x;
+                s->drag_start_y = term_mouse.y;
+                s->drag_off_x = term_mouse.x - screen_x;
+                s->drag_off_y = term_mouse.y - screen_y;
+        }
+
+        res->is_ghost = (s->is_dragging && s->drag_idx == index) || (s->is_kb_dragging && s->kb_drag_idx == index);
+        res->is_drop_target = (s->is_dragging && res->hovered && index != s->drag_idx) || (s->is_kb_dragging && s->selected_idx == index && index != s->kb_drag_idx);
+
+        if (res->is_drop_target)
+        {
+                s->drop_target_idx = index;
+        }
+
         return true;
 }
 
@@ -891,6 +986,32 @@ void ui_list_end(UIListState *s)
                         }
 
                         ui_text(s->p.x + s->p.w - 1, s->p.y + y, ch, fg, bg, false, false);
+                }
+        }
+
+        if (s->drag_idx != -1)
+        {
+                if (term_mouse.left)
+                {
+                        if (!s->is_dragging && (ui_fabsf(term_mouse.x - s->drag_start_x) > 0 || ui_fabsf(term_mouse.y - s->drag_start_y) > 0))
+                        {
+                                s->is_dragging = true;
+                        }
+                }
+                else
+                {
+                        if (s->is_dragging)
+                        {
+                                s->action_drop_src = s->drag_idx;
+                                s->action_drop_dst = s->drop_target_idx;
+                        }
+                        else
+                        {
+                                s->action_click_idx = s->drag_idx;
+                        }
+                        s->drag_idx = -1;
+                        s->is_dragging = false;
+                        s->drop_target_idx = -1;
                 }
         }
 }
