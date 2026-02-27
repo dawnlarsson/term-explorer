@@ -409,7 +409,7 @@ typedef enum
 
 typedef struct
 {
-        float target_scroll, current_scroll;
+        float target_scroll, current_scroll, scroll_velocity;
         bool dragging_scroll;
         int selected_idx;
         UIListMode mode;
@@ -489,12 +489,34 @@ void ui_list_begin(UIListState *s, const UIListParams *p, int key)
                 s->target_scroll = s->current_scroll = (cr < 0 ? 0 : cr > 1 ? 1
                                                                             : cr) *
                                                        max_scroll;
+                s->scroll_velocity = 0.0f;
         }
 
-        int scroll_step = (s->mode == UI_MODE_LIST) ? 1 : c_h;
-        s->target_scroll += term_mouse.wheel * scroll_step;
-        s->target_scroll = s->target_scroll > max_scroll ? max_scroll : s->target_scroll < 0 ? 0
-                                                                                             : s->target_scroll;
+        if (s->mode == UI_MODE_LIST)
+        {
+                s->scroll_velocity += term_mouse.wheel * 1.5f;
+                s->target_scroll += s->scroll_velocity;
+                s->scroll_velocity *= 0.82f;
+
+                if (s->scroll_velocity > -0.01f && s->scroll_velocity < 0.01f)
+                        s->scroll_velocity = 0.0f;
+        }
+        else
+        {
+                s->target_scroll += term_mouse.wheel * c_h;
+                s->scroll_velocity = 0.0f;
+        }
+
+        if (s->target_scroll > max_scroll)
+        {
+                s->target_scroll = max_scroll;
+                s->scroll_velocity = 0.0f;
+        }
+        else if (s->target_scroll < 0)
+        {
+                s->target_scroll = 0;
+                s->scroll_velocity = 0.0f;
+        }
 
         if (!s->dragging_scroll)
         {
