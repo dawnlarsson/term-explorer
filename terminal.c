@@ -518,39 +518,54 @@ void ui_end(void)
 
         Color lfg = {-1, -1, -1}, lbg = {-1, -1, -1};
         bool lbold = false, linvert = false;
+        int last_x = -1, last_y = -1;
 
-        printf("\033[?2026h\033[H");
+        printf("\033[?2026h");
 
-        for (int i = 0; i < term_height * term_width; i++)
+        for (int y = 0; y < term_height; y++)
         {
-                if (i > 0 && i % term_width == 0)
-                        printf("\r\n");
+                for (int x = 0; x < term_width; x++)
+                {
+                        int i = y * term_width + x;
+                        Cell *c = &canvas[i];
+                        Cell *lc = &last_canvas[i];
 
-                Cell c = canvas[i];
-                if (c.bold != lbold)
-                {
-                        printf(c.bold ? "\033[1m" : "\033[22m");
-                        lbold = c.bold;
+                        if (cell_eq(c, lc))
+                                continue;
+
+                        if (x != last_x + 1 || y != last_y)
+                        {
+                                printf("\033[%d;%dH", y + 1, x + 1);
+                        }
+                        last_x = x;
+                        last_y = y;
+
+                        if (c->bold != lbold)
+                        {
+                                printf(c->bold ? "\033[1m" : "\033[22m");
+                                lbold = c->bold;
+                        }
+                        if (c->invert != linvert)
+                        {
+                                printf(c->invert ? "\033[7m" : "\033[27m");
+                                linvert = c->invert;
+                        }
+                        if (!col_eq(c->bg, lbg))
+                        {
+                                SET_COL(0, c->bg);
+                                lbg = c->bg;
+                        }
+                        if (!col_eq(c->fg, lfg))
+                        {
+                                SET_COL(1, c->fg);
+                                lfg = c->fg;
+                        }
+                        fputs(c->ch, stdout);
+
+                        *lc = *c;
                 }
-                if (c.invert != linvert)
-                {
-                        printf(c.invert ? "\033[7m" : "\033[27m");
-                        linvert = c.invert;
-                }
-                if (!col_eq(c.bg, lbg))
-                {
-                        SET_COL(0, c.bg);
-                        lbg = c.bg;
-                }
-                if (!col_eq(c.fg, lfg))
-                {
-                        SET_COL(1, c.fg);
-                        lfg = c.fg;
-                }
-                fputs(c.ch, stdout);
         }
 
-        // Release the terminal frame
         printf("\x1b[0m\033[?2026l");
         fflush(stdout);
 }
@@ -854,10 +869,12 @@ void ui_list_end(UIListState *s)
 
                         const char *ch = " ";
                         Color fg = thumb_col;
+                        Color bg = s->p.scrollbar_bg;
 
                         if (top_in && bot_in)
                         {
-                                ch = "\xe2\x96\x88";
+                                ch = " ";
+                                bg = thumb_col;
                         }
                         else if (top_in)
                         {
@@ -873,7 +890,7 @@ void ui_list_end(UIListState *s)
                                 fg = s->p.scrollbar_fg;
                         }
 
-                        ui_text(s->p.x + s->p.w - 1, s->p.y + y, ch, fg, s->p.scrollbar_bg, false, false);
+                        ui_text(s->p.x + s->p.w - 1, s->p.y + y, ch, fg, bg, false, false);
                 }
         }
 }
