@@ -425,7 +425,7 @@ typedef enum
 
 typedef struct
 {
-        float target_scroll, current_scroll, scroll_velocity;
+        float target_scroll, current_scroll, scroll_velocity, drag_offset;
         bool dragging_scroll;
         int selected_idx;
         UIListMode mode;
@@ -491,13 +491,21 @@ void ui_list_begin(UIListState *s, const UIListParams *p, int key)
                 thumb_h = 1;
 
         if (term_mouse.clicked && term_mouse.x == p->x + p->w - 1 && term_mouse.y >= p->y && term_mouse.y < p->y + p->h)
+        {
                 s->dragging_scroll = true;
+                int thumb_top = p->y + (max_scroll > 0 ? (int)((s->current_scroll / max_scroll) * (p->h - thumb_h)) : 0);
+                if (term_mouse.y >= thumb_top && term_mouse.y < thumb_top + thumb_h)
+                        s->drag_offset = (float)(term_mouse.y - thumb_top);
+                else
+                        s->drag_offset = (float)thumb_h / 2.0f;
+        }
+
         if (!term_mouse.left)
                 s->dragging_scroll = false;
 
         if (s->dragging_scroll && max_scroll > 0)
         {
-                float cr = (float)(term_mouse.y - p->y - (thumb_h / 2)) / (p->h - thumb_h > 0 ? p->h - thumb_h : 1);
+                float cr = (float)(term_mouse.y - p->y - s->drag_offset) / (p->h - thumb_h > 0 ? p->h - thumb_h : 1);
                 s->target_scroll = s->current_scroll = (cr < 0 ? 0 : cr > 1 ? 1
                                                                             : cr) *
                                                        max_scroll;
@@ -620,7 +628,7 @@ bool ui_context_menu(UIContextState *ctx, const char **items, int count, int *ou
                 ctx->h = count;
         }
 
-        ui_rect(ctx->x, ctx->y, ctx->w, ctx->h, (Color){60, 60, 60});
+        ui_rect(ctx->x, ctx->y, ctx->w, ctx->h, (Color){15, 15, 15});
 
         bool action_taken = false;
 
@@ -630,7 +638,7 @@ bool ui_context_menu(UIContextState *ctx, const char **items, int count, int *ou
                 bool hovered = (term_mouse.x >= ctx->x && term_mouse.x < ctx->x + ctx->w &&
                                 term_mouse.y == item_y);
 
-                Color bg = hovered ? (Color){75, 75, 75} : (Color){60, 60, 60};
+                Color bg = hovered ? (Color){35, 35, 35} : (Color){15, 15, 15};
                 ui_rect(ctx->x, item_y, ctx->w, 1, bg);
                 ui_text(ctx->x + 1, item_y, items[i], (Color){255, 255, 255}, bg, false, false);
 

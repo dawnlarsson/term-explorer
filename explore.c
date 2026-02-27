@@ -54,10 +54,9 @@ void app_load_dir(AppState *app, const char *path)
 
                 if (app->count >= app->capacity)
                 {
-                        int new_cap = app->capacity == 0 ? 256 : app->capacity * 2;
-                        void *tmp = realloc(app->entries, new_cap * sizeof(FileEntry)) orelse return;
+                        app->capacity = app->capacity ? app->capacity * 2 : 256;
+                        void *tmp = realloc(app->entries, app->capacity * sizeof(FileEntry)) orelse return;
                         app->entries = tmp;
-                        app->capacity = new_cap;
                 }
 
                 struct stat st;
@@ -137,10 +136,7 @@ void handle_input(AppState *app, int key, const UIListParams *params)
                 app->quit = true;
 
         if (key == 'v')
-        {
-                UIListMode new_mode = (app->list.mode == UI_MODE_GRID) ? UI_MODE_LIST : UI_MODE_GRID;
-                ui_list_set_mode(&app->list, params, new_mode);
-        }
+                ui_list_set_mode(&app->list, params, !app->list.mode);
 
         if (key == KEY_BACKSPACE)
                 strcpy(app->next_dir, "..");
@@ -155,9 +151,6 @@ int main(void)
         defer term_restore();
 
         AppState app;
-        app.list.mode = UI_MODE_GRID;
-        app.next_dir[0] = '\0';
-        app.context.active = false;
 
         defer free(app.entries);
         app_load_dir(&app, ".");
@@ -186,6 +179,8 @@ int main(void)
 
                 ui_list_begin(&app.list, &params, key);
 
+                bool item_was_clicked = false;
+
                 for (int i = 0; i < app.count; i++)
                 {
                         int sx, sy;
@@ -196,7 +191,6 @@ int main(void)
                                 if (app.context.active)
                                 {
                                         pressed = false;
-
                                         if (app.context.w > 0 &&
                                             term_mouse.x >= app.context.x && term_mouse.x < app.context.x + app.context.w &&
                                             term_mouse.y >= app.context.y && term_mouse.y < app.context.y + app.context.h)
@@ -214,8 +208,12 @@ int main(void)
                                         draw_item_list(&app, i, sx, sy, hovered, pressed, params.w - 1);
                                 }
 
-                                if (hovered && term_mouse.clicked && app.entries[i].is_dir && !app.context.active)
-                                        strcpy(app.next_dir, app.entries[i].name);
+                                if (hovered && term_mouse.clicked && !app.context.active)
+                                {
+                                        item_was_clicked = true;
+                                        if (app.entries[i].is_dir)
+                                                strcpy(app.next_dir, app.entries[i].name);
+                                }
                         }
 
                         if (hovered && term_mouse.right_clicked)
@@ -228,6 +226,9 @@ int main(void)
                 }
 
                 ui_list_end(&app.list, &params);
+
+                if (term_mouse.clicked && !item_was_clicked && !app.list.dragging_scroll && !app.context.active)
+                        app.list.selected_idx = -1;
 
                 ui_rect(0, 0, term_width, params.y, clr_bg);
                 ui_rect(0, 0, term_width, 1, clr_bar);
