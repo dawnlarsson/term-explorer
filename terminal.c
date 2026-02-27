@@ -318,18 +318,29 @@ void ui_text(int x, int y, const char *txt, Color fg, Color bg, bool bold, bool 
                 int len = ((txt[i] & 0xE0) == 0xC0) ? 2 : ((txt[i] & 0xF0) == 0xE0) ? 3
                                                       : ((txt[i] & 0xF8) == 0xF0)   ? 4
                                                                                     : 1;
+                int actual_len = 0;
+
                 if (sx >= 0)
                 {
                         Cell *c = &canvas[y * term_width + sx];
                         for (int j = 0; j < len && txt[i + j]; j++)
+                        {
                                 c->ch[j] = txt[i + j];
-                        c->ch[len] = '\0';
+                                actual_len++;
+                        }
+                        c->ch[actual_len] = '\0';
                         c->fg = fg;
                         c->bg = bg;
                         c->bold = bold;
                         c->invert = invert;
                 }
-                i += len;
+                else
+                {
+                        for (int j = 0; j < len && txt[i + j]; j++)
+                                actual_len++;
+                }
+
+                i += actual_len > 0 ? actual_len : 1;
         }
 }
 
@@ -338,7 +349,7 @@ void ui_text_centered(int x, int y, int w, const char *txt, Color fg, Color bg, 
         int len = 0;
         for (int i = 0; txt[i]; i++)
                 if ((txt[i] & 0xC0) != 0x80)
-                        len++; // UTF-8 actual char length
+                        len++;
         int px = x + (w - len) / 2;
         ui_text(px < x ? x : px, y, txt, fg, bg, bold, invert);
 }
@@ -362,7 +373,7 @@ void ui_end(void)
         for (int i = 0; i < term_height * term_width; i++)
         {
                 if (i > 0 && i % term_width == 0)
-                        printf("\r\n"); // Faster than absolute pos per line
+                        printf("\r\n");
                 Cell c = canvas[i];
                 if (c.bold != lbold)
                 {
@@ -386,7 +397,154 @@ void ui_end(void)
                 }
                 fputs(c.ch, stdout);
         }
-
         printf("\x1b[0m");
         fflush(stdout);
+}
+
+typedef enum
+{
+        UI_MODE_GRID,
+        UI_MODE_LIST
+} UIListMode;
+
+typedef struct
+{
+        float target_scroll, current_scroll;
+        bool dragging_scroll;
+        int selected_idx;
+        UIListMode mode;
+} UIListState;
+
+typedef struct
+{
+        int x, y, w, h;
+        int item_count;
+        int cell_w, cell_h;
+        Color bg, scrollbar_bg, scrollbar_fg;
+} UIListParams;
+
+void ui_list_set_mode(UIListState *s, const UIListParams *p, UIListMode new_mode)
+{
+        if (s->mode == new_mode)
+                return;
+
+        int old_cols = (s->mode == UI_MODE_LIST) ? 1 : ((p->w - 1) / p->cell_w > 0 ? (p->w - 1) / p->cell_w : 1);
+        int old_c_h = (s->mode == UI_MODE_LIST) ? 1 : p->cell_h;
+
+        int top_idx = (((int)s->target_scroll + (old_c_h / 2)) / old_c_h) * old_cols;
+
+        s->mode = new_mode;
+
+        int new_cols = (s->mode == UI_MODE_LIST) ? 1 : ((p->w - 1) / p->cell_w > 0 ? (p->w - 1) / p->cell_w : 1);
+        int new_c_h = (s->mode == UI_MODE_LIST) ? 1 : p->cell_h;
+
+        s->target_scroll = s->current_scroll = (top_idx / new_cols) * new_c_h;
+}
+
+void ui_list_begin(UIListState *s, const UIListParams *p, int key)
+{
+        int cols = (s->mode == UI_MODE_LIST) ? 1 : ((p->w - 1) / p->cell_w > 0 ? (p->w - 1) / p->cell_w : 1);
+        int c_h = (s->mode == UI_MODE_LIST) ? 1 : p->cell_h;
+        int rows = (p->item_count + cols - 1) / cols;
+
+        int old_idx = s->selected_idx;
+        if (key == KEY_RIGHT && s->selected_idx < p->item_count - 1)
+                s->selected_idx++;
+        if (key == KEY_LEFT && s->selected_idx > 0)
+                s->selected_idx--;
+        if (key == KEY_DOWN && s->selected_idx + cols < p->item_count)
+                s->selected_idx += cols;
+        if (key == KEY_UP && s->selected_idx >= cols)
+                s->selected_idx -= cols;
+        if (s->selected_idx == -1 && p->item_count > 0 && (key == KEY_RIGHT || key == KEY_LEFT || key == KEY_DOWN || key == KEY_UP))
+                s->selected_idx = 0;
+
+        if (old_idx != s->selected_idx && s->selected_idx >= 0)
+        {
+                int row = s->selected_idx / cols;
+                int item_top = row * c_h;
+                if (item_top < (int)s->target_scroll)
+                {
+                        s->target_scroll = (float)item_top;
+                }
+                else if (item_top + c_h > (int)s->target_scroll + p->h)
+                {
+                        s->target_scroll = (float)(item_top + c_h - p->h);
+                }
+        }
+
+        int max_scroll = rows * c_h > p->h ? rows * c_h - p->h : 0;
+        int thumb_h = p->h * p->h / (rows * c_h > p->h ? rows * c_h : p->h);
+        if (thumb_h < 1)
+                thumb_h = 1;
+
+        if (term_mouse.clicked && term_mouse.x == p->x + p->w - 1 && term_mouse.y >= p->y && term_mouse.y < p->y + p->h)
+                s->dragging_scroll = true;
+        if (!term_mouse.left)
+                s->dragging_scroll = false;
+
+        if (s->dragging_scroll && max_scroll > 0)
+        {
+                float cr = (float)(term_mouse.y - p->y - (thumb_h / 2)) / (p->h - thumb_h > 0 ? p->h - thumb_h : 1);
+                s->target_scroll = s->current_scroll = (cr < 0 ? 0 : cr > 1 ? 1
+                                                                            : cr) *
+                                                       max_scroll;
+        }
+
+        int scroll_step = (s->mode == UI_MODE_LIST) ? 1 : c_h;
+        s->target_scroll += term_mouse.wheel * scroll_step;
+        s->target_scroll = s->target_scroll > max_scroll ? max_scroll : s->target_scroll < 0 ? 0
+                                                                                             : s->target_scroll;
+
+        if (!s->dragging_scroll)
+        {
+                s->current_scroll += (s->target_scroll - s->current_scroll) * 0.3f;
+                if (s->target_scroll - s->current_scroll > -0.05f && s->target_scroll - s->current_scroll < 0.05f)
+                {
+                        s->current_scroll = s->target_scroll;
+                }
+        }
+}
+
+bool ui_list_do_item(UIListState *s, const UIListParams *p, int index, int *out_x, int *out_y, bool *is_hovered, bool *is_pressed)
+{
+        int cols = (s->mode == UI_MODE_LIST) ? 1 : ((p->w - 1) / p->cell_w > 0 ? (p->w - 1) / p->cell_w : 1);
+        int c_w = (s->mode == UI_MODE_LIST) ? p->w - 1 : p->cell_w;
+        int c_h = (s->mode == UI_MODE_LIST) ? 1 : p->cell_h;
+
+        int screen_x = p->x + (index % cols) * c_w;
+        int screen_y = p->y + (index / cols * c_h) - (int)(s->current_scroll + 0.5f);
+
+        if (screen_y + c_h <= p->y || screen_y >= p->y + p->h)
+                return false;
+
+        *out_x = screen_x;
+        *out_y = screen_y;
+        *is_hovered = (!s->dragging_scroll && term_mouse.x >= screen_x && term_mouse.x < screen_x + c_w &&
+                       term_mouse.y >= screen_y && term_mouse.y < screen_y + c_h &&
+                       term_mouse.y >= p->y && term_mouse.y < p->y + p->h && term_mouse.x < p->x + p->w - 1);
+        *is_pressed = (*is_hovered && term_mouse.left);
+
+        if (*is_hovered && term_mouse.clicked)
+                s->selected_idx = index;
+        return true;
+}
+
+void ui_list_end(UIListState *s, const UIListParams *p)
+{
+        int cols = (s->mode == UI_MODE_LIST) ? 1 : ((p->w - 1) / p->cell_w > 0 ? (p->w - 1) / p->cell_w : 1);
+        int c_h = (s->mode == UI_MODE_LIST) ? 1 : p->cell_h;
+        int rows = (p->item_count + cols - 1) / cols;
+        int max_scroll = rows * c_h > p->h ? rows * c_h - p->h : 0;
+
+        if (max_scroll > 0)
+        {
+                int thumb_h = p->h * p->h / (rows * c_h);
+                if (thumb_h < 1)
+                        thumb_h = 1;
+                ui_rect(p->x + p->w - 1, p->y, 1, p->h, p->scrollbar_bg);
+
+                Color thumb_col = s->dragging_scroll ? (Color){255, 255, 255} : p->scrollbar_fg;
+                ui_rect(p->x + p->w - 1, p->y + (int)((s->current_scroll / max_scroll) * (p->h - thumb_h)), 1, thumb_h, thumb_col);
+        }
 }
