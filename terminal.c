@@ -39,7 +39,7 @@ typedef struct
 typedef struct
 {
         int x, y, sub_y, wheel;
-        bool has_sub, left, right, clicked, right_clicked;
+        bool has_sub, left, right, clicked, right_clicked, hide_cursor;
 } Mouse;
 
 Mouse term_mouse;
@@ -170,6 +170,7 @@ int term_poll(int timeout_ms)
                         struct input_event ev;
                         while (read(fd_m, &ev, sizeof(ev)) == sizeof(ev))
                         {
+                                term_mouse.hide_cursor = false;
                                 if (ev.type == EV_REL && ev.code == REL_X)
                                         raw_mx += ev.value;
                                 if (ev.type == EV_REL && ev.code == REL_Y)
@@ -188,6 +189,7 @@ int term_poll(int timeout_ms)
                         unsigned char m[3];
                         while (read(fd_m, m, 3) == 3)
                         {
+                                term_mouse.hide_cursor = false;
                                 term_mouse.left = m[0] & 1;
                                 term_mouse.right = m[0] & 2;
                                 raw_mx += (signed char)m[1];
@@ -221,6 +223,7 @@ int term_poll(int timeout_ms)
                                 char m;
                                 if (sscanf(buf + i + 3, "%d;%d;%d%c%n", &b, &x, &y, &m, &offset) == 4)
                                 {
+                                        term_mouse.hide_cursor = true;
                                         term_mouse.x = x - 1;
                                         term_mouse.y = y - 1;
                                         term_mouse.has_sub = false;
@@ -240,6 +243,7 @@ int term_poll(int timeout_ms)
                         else if (i + 5 < n && buf[i + 2] == 'M')
                         {
                                 int b = buf[i + 3] - 32, x = buf[i + 4] - 32, y = buf[i + 5] - 32;
+                                term_mouse.hide_cursor = true;
                                 term_mouse.x = x - 1;
                                 term_mouse.y = y - 1;
                                 term_mouse.has_sub = false;
@@ -365,6 +369,9 @@ void ui_text_centered(int x, int y, int w, const char *txt, Color fg, Color bg, 
 
 void ui_cursor(void)
 {
+        if (term_mouse.hide_cursor)
+                return;
+
         if (term_mouse.x >= 0 && term_mouse.x < term_width && term_mouse.y >= 0 && term_mouse.y < term_height)
         {
                 int idx = term_mouse.y * term_width + term_mouse.x;
@@ -623,7 +630,7 @@ bool ui_context_menu(UIContextState *ctx, const char **items, int count, int *ou
                 bool hovered = (term_mouse.x >= ctx->x && term_mouse.x < ctx->x + ctx->w &&
                                 term_mouse.y == item_y);
 
-                Color bg = hovered ? (Color){100, 100, 100} : (Color){60, 60, 60};
+                Color bg = hovered ? (Color){75, 75, 75} : (Color){60, 60, 60};
                 ui_rect(ctx->x, item_y, ctx->w, 1, bg);
                 ui_text(ctx->x + 1, item_y, items[i], (Color){255, 255, 255}, bg, false, false);
 
