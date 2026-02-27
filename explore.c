@@ -28,12 +28,10 @@ int cmp_entries(const void *a, const void *b)
         FileEntry *ea = (FileEntry *)a, *eb = (FileEntry *)b;
         if (ea->is_dir != eb->is_dir)
                 return eb->is_dir - ea->is_dir;
-
         if (!strcmp(ea->name, ".."))
                 return -1;
         if (!strcmp(eb->name, ".."))
                 return 1;
-
         return strcmp(ea->name, eb->name);
 }
 
@@ -161,13 +159,10 @@ void handle_input(AppState *app, int key, const UIListParams *params)
 {
         if (key == 'q' || key == KEY_ESC)
                 app->quit = true;
-
         if (key == 'v')
                 ui_list_set_mode(&app->list, params, !app->list.mode);
-
         if (key == KEY_BACKSPACE)
                 strcpy(app->next_dir, "..");
-
         if (key == KEY_ENTER && app->count > 0 && app->list.selected_idx >= 0 && app->entries[app->list.selected_idx].is_dir)
                 strcpy(app->next_dir, app->entries[app->list.selected_idx].name);
 }
@@ -186,7 +181,7 @@ int main(void)
 
         while (!app.quit)
         {
-                int timeout = ui_list_is_animating(&app.list) ? 16 : 1000;
+                int timeout = ui_list_is_animating(&app.list) ? term_anim_timeout : 1000;
                 if (first_frame)
                 {
                         timeout = 0;
@@ -208,7 +203,6 @@ int main(void)
                 for (int i = 0; i < app.count; i++)
                 {
                         UIItemResult item;
-
                         ui_list_do_item(&app.list, i, &item) orelse continue;
 
                         if (app.list.mode == UI_MODE_GRID)
@@ -218,7 +212,6 @@ int main(void)
 
                         if (item.clicked && app.entries[i].is_dir)
                                 strcpy(app.next_dir, app.entries[i].name);
-
                         if (item.right_clicked)
                                 ui_context_open(i);
                 }
@@ -240,7 +233,6 @@ int main(void)
                 if (ui_context_do(menu_options, 4, &selected_action))
                 {
                         FileEntry *target = &app.entries[ui_context_target()];
-
                         switch (selected_action)
                         {
                         case 0:

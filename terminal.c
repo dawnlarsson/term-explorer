@@ -11,7 +11,6 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <stdbool.h>
-#include <math.h>
 
 #ifdef __linux__
 #include <linux/input.h>
@@ -49,15 +48,64 @@ typedef struct
         bool has_sub, left, right, clicked, right_clicked, hide_cursor;
 } Mouse;
 
+typedef enum
+{
+        UI_MODE_GRID,
+        UI_MODE_LIST
+} UIListMode;
+
+typedef struct
+{
+        int x, y, w, h;
+        int item_count;
+        int cell_w, cell_h;
+        Color bg, scrollbar_bg, scrollbar_fg;
+} UIListParams;
+
+typedef struct
+{
+        float target_scroll, current_scroll, scroll_velocity;
+        float drag_offset;
+        bool dragging_scroll;
+        int selected_idx;
+        UIListMode mode;
+        bool clicked_on_item;
+        UIListParams p;
+        int last_nav_key;
+        int nav_key_streak;
+        long long last_nav_time;
+} UIListState;
+
+typedef struct
+{
+        bool active;
+        int x, y;
+        int w, h;
+        UIListState list;
+} UIContextState;
+
+typedef struct
+{
+        int x, y, w, h;
+        bool hovered;
+        bool pressed;
+        bool clicked;
+        bool right_clicked;
+} UIItemResult;
+
 Mouse term_mouse;
 int term_width, term_height;
+int term_anim_timeout = 16;
+float term_dt_scale = 1.0f;
 
 static struct termios orig_termios;
 static volatile int resize_flag = 1;
-static Cell *canvas;
+static Cell *canvas = NULL, *last_canvas = NULL;
 static int fd_m = -1, raw_mx, raw_my, color_mode = 0;
 static bool is_evdev = false;
 static char out_buf[1024 * 1024];
+static UIContextState global_ctx;
+static int global_ctx_target = -1;
 
 static void on_resize(int s) { resize_flag = 1; }
 static void on_sigint(int s)
@@ -68,7 +116,30 @@ static void on_sigint(int s)
         _exit(1);
 }
 
+static float ui_fabsf(float v) { return v < 0.0f ? -v : v; }
+
+static float ui_powf(float base, float exp)
+{
+        int e = (int)exp;
+        float f = exp - (float)e;
+        float res = 1.0f;
+        for (int i = 0; i < e; i++)
+                res *= base;
+        return res * (1.0f + f * (base - 1.0f));
+}
+
 static bool col_eq(Color a, Color b) { return a.r == b.r && a.g == b.g && a.b == b.b; }
+static bool cell_eq(const Cell *a, const Cell *b)
+{
+        if (a->bold != b->bold || a->invert != b->invert)
+                return false;
+        if (a->bg.r != b->bg.r || a->bg.g != b->bg.g || a->bg.b != b->bg.b)
+                return false;
+        if (a->fg.r != b->fg.r || a->fg.g != b->fg.g || a->fg.b != b->fg.b)
+                return false;
+        return strcmp(a->ch, b->ch) == 0;
+}
+
 static int rgb256(Color c) { return 16 + (36 * (c.r * 5 / 255)) + (6 * (c.g * 5 / 255)) + (c.b * 5 / 255); }
 static int rgb_to_ansi16(Color c, bool is_bg)
 {
@@ -90,6 +161,8 @@ void term_restore(void)
                 close(fd_m);
         if (canvas)
                 free(canvas);
+        if (last_canvas)
+                free(last_canvas);
 }
 
 int term_init(void)
@@ -136,6 +209,14 @@ int term_init(void)
                 fd_m = open("/dev/input/mice", O_RDONLY | O_NONBLOCK);
         setvbuf(stdout, out_buf, _IOFBF, sizeof(out_buf));
         printf("\033%%G\033[?25l\033[?7l\033[?1003h\033[?1015h\033[?1006h");
+
+        char *fps_env = getenv("FPS");
+        int target_fps = fps_env ? atoi(fps_env) : 60;
+        if (target_fps < 24)
+                target_fps = 60;
+        term_anim_timeout = 1000 / target_fps;
+        term_dt_scale = 60.0f / target_fps;
+
         signal(SIGWINCH, on_resize);
         return 1;
 }
@@ -161,6 +242,7 @@ int term_poll(int timeout_ms)
                 raw_my = (term_height / 2) * 16;
                 term_mouse.x = term_width / 2;
                 term_mouse.y = term_height / 2;
+                term_mouse.hide_cursor = true;
                 init_mouse = false;
         }
 
@@ -219,19 +301,6 @@ int term_poll(int timeout_ms)
         {
                 if (buf[i] == '\033')
                 {
-                        if (i + 3 < n && buf[i + 3] == '~')
-                        {
-                                if (buf[i + 2] == '5')
-                                        key = KEY_PAGE_UP;
-                                else if (buf[i + 2] == '6')
-                                        key = KEY_PAGE_DOWN;
-
-                                if (key)
-                                {
-                                        i += 3;
-                                        continue;
-                                }
-                        }
                         if (i + 2 < n && buf[i + 2] == '<')
                         {
                                 int b, x, y, offset;
@@ -315,22 +384,6 @@ int term_poll(int timeout_ms)
                                         continue;
                                 }
                         }
-                        else if (i + 2 < n)
-                        {
-                                if (buf[i + 2] == 'A')
-                                        key = KEY_UP;
-                                else if (buf[i + 2] == 'B')
-                                        key = KEY_DOWN;
-                                else if (buf[i + 2] == 'C')
-                                        key = KEY_RIGHT;
-                                else if (buf[i + 2] == 'D')
-                                        key = KEY_LEFT;
-                                if (key)
-                                {
-                                        i += 2;
-                                        continue;
-                                }
-                        }
                 }
                 if (!key)
                         key = (buf[i] == '\r') ? KEY_ENTER : (buf[i] == 127 || buf[i] == 8) ? KEY_BACKSPACE
@@ -343,10 +396,30 @@ int term_poll(int timeout_ms)
 
 void ui_begin(void)
 {
+        static long long last_time = 0;
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        long long now_us = (long long)tv.tv_sec * 1000000 + tv.tv_usec;
+
+        if (last_time != 0)
+        {
+                float dt_ms = (now_us - last_time) / 1000.0f;
+                if (dt_ms > 33.0f)
+                        dt_ms = 16.666f;
+                if (dt_ms <= 0.0f)
+                        dt_ms = 1.0f;
+                term_dt_scale = dt_ms / 16.666f;
+        }
+        last_time = now_us;
+
         static int cw, ch;
         if (term_width != cw || term_height != ch)
         {
                 canvas = realloc(canvas, term_width * term_height * sizeof(Cell)) orelse { exit(1); };
+                last_canvas = realloc(last_canvas, term_width * term_height * sizeof(Cell)) orelse { exit(1); };
+                memset(last_canvas, 0, term_width * term_height * sizeof(Cell));
+                printf("\033[2J\033[H");
+                fflush(stdout);
                 cw = term_width;
                 ch = term_height;
         }
@@ -387,7 +460,6 @@ void ui_text(int x, int y, const char *txt, Color fg, Color bg, bool bold, bool 
                                                       : ((txt[i] & 0xF8) == 0xF0)   ? 4
                                                                                     : 1;
                 int actual_len = 0;
-
                 if (sx >= 0)
                 {
                         Cell *c = &canvas[y * term_width + sx];
@@ -407,7 +479,6 @@ void ui_text(int x, int y, const char *txt, Color fg, Color bg, bool bold, bool 
                         for (int j = 0; j < len && txt[i + j]; j++)
                                 actual_len++;
                 }
-
                 i += actual_len > 0 ? actual_len : 1;
         }
 }
@@ -426,7 +497,6 @@ static void ui_cursor(void)
 {
         if (term_mouse.hide_cursor)
                 return;
-
         if (term_mouse.x >= 0 && term_mouse.x < term_width && term_mouse.y >= 0 && term_mouse.y < term_height)
         {
                 int idx = term_mouse.y * term_width + term_mouse.x;
@@ -441,87 +511,56 @@ void ui_end(void)
 
         Color lfg = {-1, -1, -1}, lbg = {-1, -1, -1};
         bool lbold = false, linvert = false;
-        printf("\033[H");
+
+        printf("\033[?2026h");
+
+        int last_y = -1, last_x = -1;
 
         for (int i = 0; i < term_height * term_width; i++)
         {
-                if (i > 0 && i % term_width == 0)
-                        printf("\r\n");
-                Cell c = canvas[i];
-                if (c.bold != lbold)
+                Cell *c = &canvas[i];
+                Cell *lc = &last_canvas[i];
+
+                if (cell_eq(c, lc))
+                        continue;
+
+                *lc = *c;
+
+                int y = i / term_width;
+                int x = i % term_width;
+
+                if (y != last_y || x != last_x + 1)
+                        printf("\033[%d;%dH", y + 1, x + 1);
+
+                last_y = y;
+                last_x = x;
+
+                if (c->bold != lbold)
                 {
-                        printf(c.bold ? "\033[1m" : "\033[22m");
-                        lbold = c.bold;
+                        printf(c->bold ? "\033[1m" : "\033[22m");
+                        lbold = c->bold;
                 }
-                if (c.invert != linvert)
+                if (c->invert != linvert)
                 {
-                        printf(c.invert ? "\033[7m" : "\033[27m");
-                        linvert = c.invert;
+                        printf(c->invert ? "\033[7m" : "\033[27m");
+                        linvert = c->invert;
                 }
-                if (!col_eq(c.bg, lbg))
+                if (!col_eq(c->bg, lbg))
                 {
-                        SET_COL(0, c.bg);
-                        lbg = c.bg;
+                        SET_COL(0, c->bg);
+                        lbg = c->bg;
                 }
-                if (!col_eq(c.fg, lfg))
+                if (!col_eq(c->fg, lfg))
                 {
-                        SET_COL(1, c.fg);
-                        lfg = c.fg;
+                        SET_COL(1, c->fg);
+                        lfg = c->fg;
                 }
-                fputs(c.ch, stdout);
+                fputs(c->ch, stdout);
         }
-        printf("\x1b[0m");
+
+        printf("\x1b[0m\033[?2026l");
         fflush(stdout);
 }
-
-typedef enum
-{
-        UI_MODE_GRID,
-        UI_MODE_LIST
-} UIListMode;
-
-typedef struct
-{
-        int x, y, w, h;
-        int item_count;
-        int cell_w, cell_h;
-        Color bg, scrollbar_bg, scrollbar_fg;
-} UIListParams;
-
-typedef struct
-{
-        float target_scroll, current_scroll, scroll_velocity;
-        float drag_offset;
-        bool dragging_scroll;
-        int selected_idx;
-        UIListMode mode;
-        bool clicked_on_item;
-        UIListParams p;
-
-        int last_nav_key;
-        int nav_key_streak;
-        long long last_nav_time;
-} UIListState;
-
-typedef struct
-{
-        bool active;
-        int x, y;
-        int w, h;
-        UIListState list;
-} UIContextState;
-
-typedef struct
-{
-        int x, y, w, h;
-        bool hovered;
-        bool pressed;
-        bool clicked;
-        bool right_clicked;
-} UIItemResult;
-
-static UIContextState global_ctx;
-static int global_ctx_target = -1;
 
 void ui_list_reset(UIListState *s)
 {
@@ -532,7 +571,6 @@ void ui_list_reset(UIListState *s)
         s->dragging_scroll = false;
         s->selected_idx = -1;
         s->clicked_on_item = false;
-
         s->last_nav_key = 0;
         s->nav_key_streak = 0;
         s->last_nav_time = 0;
@@ -542,15 +580,12 @@ void ui_list_set_mode(UIListState *s, const UIListParams *p, UIListMode mode)
 {
         if (s->mode == mode)
                 return;
-
         s->mode = mode;
-
         if (s->selected_idx >= 0)
         {
                 int cols = (s->mode == UI_MODE_LIST) ? 1 : ((p->w - 1) / p->cell_w > 0 ? (p->w - 1) / p->cell_w : 1);
                 int c_h = (s->mode == UI_MODE_LIST) ? 1 : p->cell_h;
                 int row = s->selected_idx / cols;
-
                 s->target_scroll = (float)(row * c_h);
                 s->current_scroll = s->target_scroll;
         }
@@ -574,9 +609,7 @@ void ui_list_begin(UIListState *s, const UIListParams *p, int key)
         if (key == KEY_UP || key == KEY_DOWN || key == KEY_LEFT || key == KEY_RIGHT)
         {
                 if (key == s->last_nav_key && (now_ms - s->last_nav_time) < 400)
-                {
                         s->nav_key_streak++;
-                }
                 else
                 {
                         s->last_nav_key = key;
@@ -697,20 +730,19 @@ void ui_list_begin(UIListState *s, const UIListParams *p, int key)
                 s->scroll_velocity = 0.0f;
         }
 
-        float friction = 0.82f;
+        float friction = ui_powf(0.82f, term_dt_scale);
         float wheel_val = term_mouse.wheel;
 
         if (wheel_val != 0)
         {
                 float base_power = (s->mode == UI_MODE_LIST) ? 0.18f : ((float)c_h * 0.1f);
-
                 float wheel_dir = wheel_val > 0 ? 1.0f : -1.0f;
                 float vel_dir = s->scroll_velocity > 0 ? 1.0f : (s->scroll_velocity < 0 ? -1.0f : 0.0f);
 
-                if (vel_dir == wheel_dir && fabsf(s->scroll_velocity) > 0.05f)
-                        base_power *= (2.5f + fabsf(s->scroll_velocity) * 1.2f);
+                if (vel_dir == wheel_dir && ui_fabsf(s->scroll_velocity) > 0.05f)
+                        base_power *= (2.5f + ui_fabsf(s->scroll_velocity) * 1.2f);
 
-                s->scroll_velocity += wheel_val * base_power;
+                s->scroll_velocity += wheel_val * base_power * term_dt_scale;
         }
 
         s->target_scroll += s->scroll_velocity;
@@ -745,7 +777,8 @@ void ui_list_begin(UIListState *s, const UIListParams *p, int key)
 
         if (!s->dragging_scroll)
         {
-                s->current_scroll += (s->target_scroll - s->current_scroll) * 0.3f;
+                float lerp_factor = 1.0f - ui_powf(0.7f, term_dt_scale);
+                s->current_scroll += (s->target_scroll - s->current_scroll) * lerp_factor;
                 if (s->target_scroll - s->current_scroll > -0.05f && s->target_scroll - s->current_scroll < 0.05f)
                         s->current_scroll = s->target_scroll;
         }
@@ -813,7 +846,6 @@ void ui_list_end(UIListState *s)
                 if (thumb_h < 1)
                         thumb_h = 1;
                 ui_rect(s->p.x + s->p.w - 1, s->p.y, 1, s->p.h, s->p.scrollbar_bg);
-
                 Color thumb_col = s->dragging_scroll ? (Color){255, 255, 255} : s->p.scrollbar_fg;
                 ui_rect(s->p.x + s->p.w - 1, s->p.y + (int)((s->current_scroll / max_scroll) * (s->p.h - thumb_h)), 1, thumb_h, thumb_col);
         }
@@ -834,21 +866,16 @@ void ui_context_open(int target_idx)
         global_ctx.y = term_mouse.y;
         global_ctx.w = 0;
         global_ctx_target = target_idx;
-
         global_ctx.list.current_scroll = 0;
         global_ctx.list.target_scroll = 0;
         global_ctx.list.scroll_velocity = 0;
         global_ctx.list.dragging_scroll = false;
         global_ctx.list.selected_idx = -1;
         global_ctx.list.mode = UI_MODE_LIST;
-
         term_mouse.right_clicked = false;
 }
 
-int ui_context_target(void)
-{
-        return global_ctx_target;
-}
+int ui_context_target(void) { return global_ctx_target; }
 
 void ui_context_close(void)
 {
@@ -860,7 +887,6 @@ bool ui_context_do(const char **items, int count, int *out_idx)
 {
         if (!global_ctx.active)
                 return false;
-
         if (global_ctx.w == 0)
         {
                 int max_w = 0;
@@ -901,23 +927,19 @@ bool ui_context_do(const char **items, int count, int *out_idx)
             .x = global_ctx.x, .y = global_ctx.y, .w = global_ctx.w, .h = global_ctx.h, .item_count = count, .cell_w = global_ctx.w, .cell_h = 1, .bg = (Color){15, 15, 15}, .scrollbar_bg = (Color){25, 25, 25}, .scrollbar_fg = (Color){100, 100, 100}};
 
         ui_list_begin(&global_ctx.list, &params, 0);
-
         bool action_taken = false;
 
         for (int i = 0; i < count; i++)
         {
                 UIItemResult item;
-
                 if (ui_list_do_item(&global_ctx.list, i, &item))
                 {
                         Color bg = (item.hovered || global_ctx.list.selected_idx == i) ? (Color){35, 35, 35} : (Color){15, 15, 15};
                         if (item.pressed)
                                 bg = (Color){60, 60, 60};
-
                         int item_w = params.w - 1;
                         ui_rect(item.x, item.y, item_w, 1, bg);
                         ui_text(item.x + 1, item.y, items[i], (Color){255, 255, 255}, bg, false, false);
-
                         if (item.clicked)
                         {
                                 *out_idx = i;
