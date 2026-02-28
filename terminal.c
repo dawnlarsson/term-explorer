@@ -60,9 +60,10 @@ typedef struct
 typedef struct
 {
         float target_scroll, current_scroll, scroll_velocity, drag_offset, kb_drag_x, kb_drag_y, box_start_y_world;
-        bool dragging_scroll, clicked_on_item, is_dragging, is_kb_dragging, is_box_selecting;
+        bool dragging_scroll, clicked_on_item, is_dragging, is_kb_dragging, is_box_selecting, ignore_mouse;
         int selected_idx, last_nav_key, nav_key_streak, drag_idx, drag_start_x, drag_start_y, drag_off_x, drag_off_y;
         int drop_target_idx, action_drop_src, action_drop_dst, action_click_idx, kb_drag_idx, box_start_x, selections_cap;
+        int last_mouse_x, last_mouse_y;
         long long last_nav_time;
         UIListMode mode;
         UIListParams p;
@@ -127,8 +128,19 @@ static bool cell_eq(const Cell *a, const Cell *b)
 static int rgb256(Color c) { return 16 + (36 * (c.r * 5 / 255)) + (6 * (c.g * 5 / 255)) + (c.b * 5 / 255); }
 static int rgb_to_ansi16(Color c, bool is_bg)
 {
-        int r = c.r > 35, g = c.g > 35, b = c.b > 35;
-        int bright = (c.r > 170 || c.g > 170 || c.b > 170) || (!r && !g && !b && (c.r || c.g || c.b));
+        int r = c.r > 127 ? 1 : 0, g = c.g > 127 ? 1 : 0, b = c.b > 127 ? 1 : 0;
+
+        if (!r && !g && !b && (c.r || c.g || c.b))
+        {
+                if (c.r >= c.g && c.r >= c.b)
+                        r = 1;
+                else if (c.g >= c.r && c.g >= c.b)
+                        g = 1;
+                else
+                        b = 1;
+        }
+
+        int bright = (c.r > 170 || c.g > 170 || c.b > 170) ? 1 : 0;
         return (is_bg ? (bright ? 100 : 40) : (bright ? 90 : 30)) + (r | (g << 1) | (b << 2));
 }
 
@@ -540,9 +552,18 @@ void ui_list_begin(UIListState *s, const UIListParams *p, int key)
         s->clicked_on_item = false;
         s->action_drop_src = s->action_drop_dst = s->action_click_idx = s->drop_target_idx = -1;
 
+        if (term_mouse.x != s->last_mouse_x || term_mouse.y != s->last_mouse_y)
+        {
+                s->ignore_mouse = false;
+                s->last_mouse_x = term_mouse.x;
+                s->last_mouse_y = term_mouse.y;
+        }
+
+        if (key >= KEY_UP && key <= KEY_SHIFT_PAGE_DOWN)
+                s->ignore_mouse = true;
+
         if (p->item_count > s->selections_cap)
         {
-                // Fixed: Arbitrary block code requires {} with orelse
                 s->selections = realloc(s->selections, p->item_count * sizeof(bool)) orelse { exit(1); };
                 s->active_box_selections = realloc(s->active_box_selections, p->item_count * sizeof(bool)) orelse { exit(1); };
                 memset(s->selections + s->selections_cap, 0, (p->item_count - s->selections_cap) * sizeof(bool));
@@ -685,6 +706,9 @@ void ui_list_begin(UIListState *s, const UIListParams *p, int key)
                 float wheel_dir = term_mouse.wheel > 0 ? 1.0f : -1.0f;
                 float vel_dir = s->scroll_velocity > 0 ? 1.0f : (s->scroll_velocity < 0 ? -1.0f : 0.0f);
 
+                if (vel_dir != 0.0f && vel_dir != wheel_dir)
+                        s->scroll_velocity = 0.0f;
+
                 if (vel_dir == wheel_dir && ui_fabsf(s->scroll_velocity) > 0.05f)
                         base_power *= (2.5f + ui_fabsf(s->scroll_velocity) * 1.2f);
                 s->scroll_velocity += term_mouse.wheel * base_power;
@@ -768,7 +792,7 @@ bool ui_list_do_item(UIListState *s, int index, UIItemResult *res)
                              term_mouse.x >= global_ctx.x && term_mouse.x < global_ctx.x + global_ctx.w &&
                              term_mouse.y >= global_ctx.y && term_mouse.y < global_ctx.y + global_ctx.h;
 
-        res->hovered = (!over_ctx_menu && !s->dragging_scroll && !s->is_box_selecting &&
+        res->hovered = (!s->ignore_mouse && !over_ctx_menu && !s->dragging_scroll && !s->is_box_selecting &&
                         term_mouse.x >= screen_x && term_mouse.x < screen_x + c_w &&
                         term_mouse.y >= screen_y && term_mouse.y < screen_y + c_h &&
                         term_mouse.y >= s->p.y && term_mouse.y < s->p.y + s->p.h && term_mouse.x < s->p.x + s->p.w - 1);
