@@ -40,6 +40,9 @@ typedef struct
         float drop_anim;
         float carry_x, carry_y;
 
+        int drop_dst_x, drop_dst_y;
+        bool is_folder_drop;
+
         int last_hovered_idx;
         FileEntry fly_entry;
         float fly_anim;
@@ -73,6 +76,12 @@ void app_load_dir(AppState *app, const char *path)
         (chdir(path) == 0) orelse return;
         getcwd(app->cwd, sizeof(app->cwd)) orelse return;
 
+        char selected_name[256];
+        int old_idx = app->list.selected_idx;
+
+        if (app->count > 0 && old_idx >= 0 && old_idx < app->count)
+                strcpy(selected_name, app->entries[old_idx].name);
+
         app->count = 0;
         UIListMode old_mode = app->list.mode;
         ui_list_reset(&app->list);
@@ -100,8 +109,22 @@ void app_load_dir(AppState *app, const char *path)
                 e->is_exec = (st.st_mode & S_IXUSR) && !e->is_dir;
         }
         qsort(app->entries, app->count, sizeof(FileEntry), cmp_entries);
+
         if (app->count > 0)
-                app->list.selected_idx = 0;
+        {
+                app->list.selected_idx = old_idx >= app->count ? app->count - 1 : (old_idx < 0 ? 0 : old_idx);
+                if (selected_name[0])
+                {
+                        for (int i = 0; i < app->count; i++)
+                        {
+                                if (!strcmp(app->entries[i].name, selected_name))
+                                {
+                                        app->list.selected_idx = i;
+                                        break;
+                                }
+                        }
+                }
+        }
 }
 
 void draw_item_grid(AppState *app, FileEntry *e, int x, int y, int w, int h, bool is_sel, bool is_hover, bool is_ghost, bool is_drop_target, bool is_multi_sel, bool is_dropped)
@@ -218,7 +241,6 @@ void handle_input(AppState *app, int *key, const UIListParams *params)
                                 }
                         }
 
-                        // Trigger the Fly Animation
                         int cols = (app->list.mode == UI_MODE_LIST) ? 1 : ((params->w - 1) / params->cell_w > 0 ? (params->w - 1) / params->cell_w : 1);
                         int c_w = (app->list.mode == UI_MODE_LIST) ? params->w - 1 : params->cell_w;
                         int c_h = (app->list.mode == UI_MODE_LIST) ? 1 : params->cell_h;
@@ -230,7 +252,7 @@ void handle_input(AppState *app, int *key, const UIListParams *params)
 
                         if (found_idx != -1)
                         {
-                                app->fly_is_pickup = false; // Lerp from cursor back to list
+                                app->fly_is_pickup = false;
                                 for (int i = found_idx; i < app->carried_count - 1; i++)
                                         app->carried[i] = app->carried[i + 1];
                                 app->carried_count--;
@@ -239,7 +261,7 @@ void handle_input(AppState *app, int *key, const UIListParams *params)
                         }
                         else if (app->carried_count < 256)
                         {
-                                app->fly_is_pickup = true; // Lerp from list to cursor
+                                app->fly_is_pickup = true;
                                 app->carried[app->carried_count].entry = app->entries[src];
                                 snprintf(app->carried[app->carried_count].path, PATH_MAX, "%s/%s", app->cwd, app->entries[src].name);
                                 app->carried_count++;
@@ -254,6 +276,7 @@ void handle_input(AppState *app, int *key, const UIListParams *params)
                 {
                         app->drop_count = 0;
                         app->drop_anim = 1.0f;
+                        app->is_folder_drop = false;
                         for (int i = 0; i < app->carried_count; i++)
                         {
                                 char new_path[PATH_MAX];
@@ -306,14 +329,12 @@ int main(void)
 
         AppState app;
         app.last_hovered_idx = -1;
-        app.fly_anim = 0.0f;
-        app.pickup_anim = 0.0f;
         defer free(app.entries);
         app_load_dir(&app, ".");
 
         bool first_frame = true;
-        bool was_carrying = false;
-        bool was_dragging = false;
+        bool was_carrying;
+        bool was_dragging;
 
         while (!app.quit)
         {
@@ -325,7 +346,7 @@ int main(void)
                 UIListParams params = {0, 1, term_width, term_height - 2 > 0 ? term_height - 2 : 1, app.count, 14, 7, clr_bg, {30, 30, 30}, clr_bar};
                 handle_input(&app, &key, &params);
 
-                if (app.next_dir[0])
+                if (app.next_dir[0] && app.drop_anim <= 0.01f)
                 {
                         app_load_dir(&app, app.next_dir);
                         app.next_dir[0] = '\0';
@@ -379,6 +400,7 @@ int main(void)
                         app.carry_y = app.list.kb_drag_y;
                 }
 
+                // --- BASE LAYER PASS ---
                 for (int i = 0; i < app.count; i++)
                 {
                         UIItemResult item;
@@ -411,7 +433,7 @@ int main(void)
                                 }
                         }
 
-                        bool is_picked_up_mouse = (!app.carrying && current_drag != -1 && app.list.selections[current_drag] && item.is_selected);
+                        bool is_picked_up_mouse = (!app.carrying && current_drag != -1 && (app.list.selections[current_drag] ? item.is_selected : current_drag == i));
                         bool is_ghost = item.is_ghost || is_picked_up_mouse || is_carried;
 
                         bool is_dropped = false;
@@ -427,32 +449,12 @@ int main(void)
                                 }
                         }
 
-                        int r_x = item.x;
-                        int r_y = item.y;
-
-                        if (is_dropped)
+                        if (!is_dropped) // Skip drawing dropped items in the base layer
                         {
-                                float ease = app.drop_anim * app.drop_anim;
-                                r_x += (int)((app.carry_x - item.x) * ease);
-                                r_y += (int)((app.carry_y - item.y) * ease);
-                        }
-
-                        if (app.list.mode == UI_MODE_GRID)
-                                draw_item_grid(&app, &app.entries[i], r_x, r_y, item.w, item.h, is_sel, item.hovered, is_ghost, valid_drop, item.is_selected, is_dropped);
-                        else
-                                draw_item_list(&app, &app.entries[i], r_x, r_y, item.w, item.h, is_sel, item.hovered, is_ghost, valid_drop, item.is_selected, is_dropped);
-
-                        // --- FIX: Draw the flying multi-selection copies squeezing into the cursor ---
-                        if ((is_carried || is_picked_up_mouse) && app.pickup_anim > 0.01f)
-                        {
-                                float ease = app.pickup_anim * app.pickup_anim;
-                                int fly_x = app.carry_x + (item.x - app.carry_x) * ease;
-                                int fly_y = app.carry_y + (item.y - app.carry_y) * ease;
-
                                 if (app.list.mode == UI_MODE_GRID)
-                                        draw_item_grid(&app, &app.entries[i], fly_x, fly_y, item.w, item.h, false, false, false, false, false, false);
+                                        draw_item_grid(&app, &app.entries[i], item.x, item.y, item.w, item.h, is_sel, item.hovered, is_ghost, valid_drop, item.is_selected, false);
                                 else
-                                        draw_item_list(&app, &app.entries[i], fly_x, fly_y, item.w, item.h, false, false, false, false, false, false);
+                                        draw_item_list(&app, &app.entries[i], item.x, item.y, item.w, item.h, is_sel, item.hovered, is_ghost, valid_drop, item.is_selected, false);
                         }
 
                         if (item.right_clicked)
@@ -460,21 +462,94 @@ int main(void)
                 }
 
                 ui_list_end(&app.list);
+                
+                for (int i = 0; i < app.count; i++)
+                {
+                        int current_drag = app.list.is_dragging ? app.list.drag_idx : app.list.kb_drag_idx;
+
+                        bool is_carried = false;
+                        if (app.carrying)
+                        {
+                                for (int c = 0; c < app.carried_count; c++)
+                                {
+                                        if (!strcmp(app.entries[i].name, app.carried[c].entry.name))
+                                        {
+                                                is_carried = true;
+                                                break;
+                                        }
+                                }
+                        }
+
+                        bool is_picked_up_mouse = (!app.carrying && current_drag != -1 && (app.list.selections[current_drag] ? app.list.selections[i] : current_drag == i));
+
+                        bool is_dropped = false;
+                        if (app.drop_anim > 0.01f)
+                        {
+                                for (int d = 0; d < app.drop_count; d++)
+                                {
+                                        if (!strcmp(app.entries[i].name, app.drop_names[d]))
+                                        {
+                                                is_dropped = true;
+                                                break;
+                                        }
+                                }
+                        }
+
+                        if (is_dropped || ((is_carried || is_picked_up_mouse) && app.pickup_anim > 0.01f))
+                        {
+                                int base_x = params.x + (i % cols) * c_w;
+                                int base_y = params.y + (i / cols * c_h) - scroll_int;
+
+                                if (is_dropped)
+                                {
+                                        float ease = app.drop_anim * app.drop_anim;
+                                        int r_x = base_x, r_y = base_y;
+                                        if (app.is_folder_drop)
+                                        {
+                                                r_x = app.drop_dst_x + (int)((app.carry_x - app.drop_dst_x) * ease);
+                                                r_y = app.drop_dst_y + (int)((app.carry_y - app.drop_dst_y) * ease);
+                                        }
+                                        else
+                                        {
+                                                r_x += (int)((app.carry_x - base_x) * ease);
+                                                r_y += (int)((app.carry_y - base_y) * ease);
+                                        }
+                                        if (app.list.mode == UI_MODE_GRID)
+                                                draw_item_grid(&app, &app.entries[i], r_x, r_y, c_w, c_h, false, false, false, false, false, true);
+                                        else
+                                                draw_item_list(&app, &app.entries[i], r_x, r_y, c_w, c_h, false, false, false, false, false, true);
+                                }
+
+                                if ((is_carried || is_picked_up_mouse) && app.pickup_anim > 0.01f)
+                                {
+                                        float ease = app.pickup_anim * app.pickup_anim;
+                                        int fly_x = app.carry_x + (base_x - app.carry_x) * ease;
+                                        int fly_y = app.carry_y + (base_y - app.carry_y) * ease;
+                                        if (app.list.mode == UI_MODE_GRID)
+                                                draw_item_grid(&app, &app.entries[i], fly_x, fly_y, c_w, c_h, false, false, false, false, false, false);
+                                        else
+                                                draw_item_list(&app, &app.entries[i], fly_x, fly_y, c_w, c_h, false, false, false, false, false, false);
+                                }
+                        }
+                }
 
                 if (app.list.action_click_idx != -1 && app.entries[app.list.action_click_idx].is_dir)
                         strcpy(app.next_dir, app.entries[app.list.action_click_idx].name);
 
-                if (app.list.action_drop_src != -1 && app.list.action_drop_dst != -1)
+                if (app.list.action_drop_src != -1)
                 {
                         int src = app.list.action_drop_src, dst = app.list.action_drop_dst;
 
-                        bool drag_multi = false;
-                        for (int i = 0; i < app.count; i++)
-                                if (app.list.selections[i])
-                                        drag_multi = true;
+                        bool drag_multi;
+                        if (src >= 0 && app.list.selections[src])
+                        {
+                                for (int i = 0; i < app.count; i++)
+                                        if (app.list.selections[i])
+                                                drag_multi = true;
+                        }
 
-                        int temp_carried_count = 0;
-                        CarriedFile temp_carried[256];
+                        int temp_carried_count;
+                        raw CarriedFile temp_carried[256];
 
                         app.drop_count = 0;
                         app.drop_anim = 1.0f;
@@ -494,8 +569,12 @@ int main(void)
                                 }
                         }
 
-                        if (app.entries[dst].is_dir && strcmp(app.entries[dst].name, ".") != 0)
+                        if (dst != -1 && app.entries[dst].is_dir && strcmp(app.entries[dst].name, ".") != 0)
                         {
+                                app.drop_dst_x = params.x + (dst % cols) * c_w;
+                                app.drop_dst_y = params.y + (dst / cols * c_h) - scroll_int;
+                                app.is_folder_drop = true;
+
                                 for (int i = 0; i < temp_carried_count; i++)
                                 {
                                         char new_path[PATH_MAX];
@@ -503,6 +582,10 @@ int main(void)
                                         rename(temp_carried[i].path, new_path);
                                 }
                                 strcpy(app.next_dir, ".");
+                        }
+                        else
+                        {
+                                app.is_folder_drop = false;
                         }
                 }
 
