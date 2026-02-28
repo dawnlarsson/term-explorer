@@ -3,7 +3,7 @@
 #include <sys/stat.h>
 #include <limits.h>
 
-Color clr_bg = {0, 0, 0}, clr_bar = {170, 170, 170}, clr_text = {255, 255, 255}, clr_folder = {255, 255, 85}, clr_hover = {170, 170, 170};
+Color clr_bg = {0, 0, 0}, clr_bar = {170, 170, 170}, clr_text = {255, 255, 255}, clr_folder = {255, 255, 85}, clr_hover = {170, 170, 170}, clr_sel_bg = {40, 70, 120};
 
 typedef struct
 {
@@ -79,15 +79,15 @@ void app_load_dir(AppState *app, const char *path)
                 app->list.selected_idx = 0;
 }
 
-void draw_item_grid(AppState *app, int i, int x, int y, int w, int h, bool is_sel, bool is_hover, bool is_ghost, bool is_drop_target)
+void draw_item_grid(AppState *app, int i, int x, int y, int w, int h, bool is_sel, bool is_hover, bool is_ghost, bool is_drop_target, bool is_multi_sel)
 {
-        Color item_bg = is_drop_target ? (Color){50, 150, 50} : (is_ghost ? (Color){30, 30, 30} : (is_hover || is_sel ? clr_hover : clr_bg));
+        Color item_bg = is_drop_target ? (Color){50, 150, 50} : (is_ghost ? (Color){30, 30, 30} : (is_multi_sel ? clr_sel_bg : (is_hover || is_sel ? clr_hover : clr_bg)));
         Color icon_fg = app->entries[i].is_dir ? clr_folder : (app->entries[i].is_exec ? (Color){85, 255, 85} : clr_text);
 
         if (is_ghost)
                 icon_fg = (Color){100, 100, 100};
 
-        if (is_hover || is_sel || is_ghost || is_drop_target)
+        if (is_hover || is_sel || is_ghost || is_drop_target || is_multi_sel)
                 ui_rect(x + 1, y, w - 2, h, item_bg);
 
         char disp[256];
@@ -148,9 +148,9 @@ void draw_item_grid(AppState *app, int i, int x, int y, int w, int h, bool is_se
                 ui_text_centered(x + 1, y + 5 + y_off, mw, l2, is_ghost ? icon_fg : clr_text, item_bg, false, false);
 }
 
-void draw_item_list(AppState *app, int i, int x, int y, int w, int h, bool is_sel, bool is_hover, bool is_ghost, bool is_drop_target)
+void draw_item_list(AppState *app, int i, int x, int y, int w, int h, bool is_sel, bool is_hover, bool is_ghost, bool is_drop_target, bool is_multi_sel)
 {
-        Color item_bg = is_drop_target ? (Color){50, 150, 50} : (is_ghost ? (Color){30, 30, 30} : (is_hover || is_sel ? clr_hover : clr_bg));
+        Color item_bg = is_drop_target ? (Color){50, 150, 50} : (is_ghost ? (Color){30, 30, 30} : (is_multi_sel ? clr_sel_bg : (is_hover || is_sel ? clr_hover : clr_bg)));
         Color icon_fg = app->entries[i].is_dir ? clr_folder : (app->entries[i].is_exec ? (Color){85, 255, 85} : clr_text);
         if (is_ghost)
                 icon_fg = (Color){100, 100, 100};
@@ -184,8 +184,19 @@ void draw_item_list(AppState *app, int i, int x, int y, int w, int h, bool is_se
 
 void handle_input(AppState *app, int key, const UIListParams *params)
 {
-        if (key == 'q' || (key == KEY_ESC && !app->list.is_kb_dragging))
+        if (key == 'q')
                 app->quit = true;
+
+        if (key == KEY_ESC && !app->list.is_kb_dragging)
+        {
+                bool has_selections = false;
+                for (int i = 0; i < app->count; i++)
+                        if (app->list.selections[i])
+                                has_selections = true;
+                if (!has_selections)
+                        app->quit = true;
+        }
+
         if (key == 'v')
                 ui_list_set_mode(&app->list, params, !app->list.mode);
         if (key == KEY_BACKSPACE && !app->list.is_kb_dragging)
@@ -193,7 +204,6 @@ void handle_input(AppState *app, int key, const UIListParams *params)
         if (key == KEY_ENTER && !app->list.is_kb_dragging && app->count > 0 && app->list.selected_idx >= 0 && app->entries[app->list.selected_idx].is_dir)
                 strcpy(app->next_dir, app->entries[app->list.selected_idx].name);
 }
-
 int main(void)
 {
         term_init() orelse return 1;
@@ -208,7 +218,7 @@ int main(void)
 
         while (!app.quit)
         {
-                int timeout = (ui_list_is_animating(&app.list) || app.list.is_dragging || app.list.is_kb_dragging) ? term_anim_timeout : 1000;
+                int timeout = (ui_list_is_animating(&app.list) || app.list.is_dragging || app.list.is_kb_dragging || app.list.is_box_selecting) ? term_anim_timeout : 1000;
                 if (first_frame)
                 {
                         timeout = 0;
@@ -232,14 +242,27 @@ int main(void)
                         UIItemResult item;
                         ui_list_do_item(&app.list, i, &item) orelse continue;
 
+                        if (!strcmp(app.entries[i].name, ".."))
+                        {
+                                app.list.selections[i] = false;
+                                item.is_selected = false;
+                                item.is_ghost = false;
+                        }
+
+                        int current_drag = app.list.is_dragging ? app.list.drag_idx : app.list.kb_drag_idx;
                         bool is_sel = (i == app.list.selected_idx);
                         bool valid_drop = item.is_drop_target && app.entries[i].is_dir;
-                        bool is_ghost = item.is_ghost && strcmp(app.entries[i].name, "..") != 0;
+
+                        bool is_ghost = item.is_ghost;
+                        if (current_drag != -1 && app.list.selections[current_drag] && item.is_selected)
+                        {
+                                is_ghost = true;
+                        }
 
                         if (app.list.mode == UI_MODE_GRID)
-                                draw_item_grid(&app, i, item.x, item.y, item.w, item.h, is_sel, item.hovered, is_ghost, valid_drop);
+                                draw_item_grid(&app, i, item.x, item.y, item.w, item.h, is_sel, item.hovered, is_ghost, valid_drop, item.is_selected);
                         else
-                                draw_item_list(&app, i, item.x, item.y, item.w, item.h, is_sel, item.hovered, is_ghost, valid_drop);
+                                draw_item_list(&app, i, item.x, item.y, item.w, item.h, is_sel, item.hovered, is_ghost, valid_drop, item.is_selected);
 
                         if (item.right_clicked)
                                 ui_context_open(i);
@@ -260,11 +283,22 @@ int main(void)
 
                         if (app.entries[dst].is_dir && strcmp(app.entries[src].name, "..") != 0)
                         {
-                                char old_path[PATH_MAX], new_path[PATH_MAX];
-                                snprintf(old_path, sizeof(old_path), "%s/%s", app.cwd, app.entries[src].name);
-                                snprintf(new_path, sizeof(new_path), "%s/%s/%s", app.cwd, app.entries[dst].name, app.entries[src].name);
+                                bool drag_multi = app.list.selections[src];
 
-                                rename(old_path, new_path);
+                                for (int i = 0; i < app.count; i++)
+                                {
+                                        if ((drag_multi && app.list.selections[i]) || (!drag_multi && i == src))
+                                        {
+                                                if (i == dst || !strcmp(app.entries[i].name, ".."))
+                                                        continue;
+
+                                                char old_path[PATH_MAX], new_path[PATH_MAX];
+                                                snprintf(old_path, sizeof(old_path), "%s/%s", app.cwd, app.entries[i].name);
+                                                snprintf(new_path, sizeof(new_path), "%s/%s/%s", app.cwd, app.entries[dst].name, app.entries[i].name);
+
+                                                rename(old_path, new_path);
+                                        }
+                                }
                                 strcpy(app.next_dir, ".");
                         }
                 }
@@ -276,7 +310,7 @@ int main(void)
                 ui_text(1, 0, header, (Color){0, 0, 0}, clr_bar, false, false);
 
                 ui_rect(0, term_height - 1, term_width, 1, clr_bar);
-                ui_text(1, term_height - 1, " Arrows: Navigate | v: Toggle View | Backspace: Up | Tab: Move | 'q': Quit ", (Color){0, 0, 0}, clr_bar, false, false);
+                ui_text(1, term_height - 1, " Arrows: Navigate | Space: Select | Tab: Move | Esc: Cancel | 'q': Quit ", (Color){0, 0, 0}, clr_bar, false, false);
 
                 const char *menu_options[] = {"Open", "Rename", "Delete", "Cancel"};
                 int selected_action = -1;
@@ -297,48 +331,60 @@ int main(void)
                         }
                 }
 
-                if (app.list.is_dragging && app.list.drag_idx >= 0 && app.list.drag_idx < app.count && strcmp(app.entries[app.list.drag_idx].name, "..") != 0)
+                int current_drag = app.list.is_dragging ? app.list.drag_idx : app.list.kb_drag_idx;
+
+                if (current_drag >= 0 && current_drag < app.count && strcmp(app.entries[current_drag].name, "..") != 0)
                 {
-                        int drag_idx = app.list.drag_idx;
-                        if (app.list.mode == UI_MODE_GRID)
+                        int drag_count = 0;
+                        if (app.list.selections[current_drag])
                         {
-                                int fx = term_mouse.x - app.list.drag_off_x;
-                                int fy = term_mouse.y - app.list.drag_off_y;
-                                draw_item_grid(&app, drag_idx, fx, fy, params.cell_w, params.cell_h, false, false, false, false);
+                                for (int i = 0; i < app.count; i++)
+                                        if (app.list.selections[i])
+                                                drag_count++;
+                        }
+
+                        int fx, fy, drag_w;
+
+                        if (app.list.is_dragging)
+                        {
+                                fx = term_mouse.x - app.list.drag_off_x;
+                                fy = term_mouse.y - app.list.drag_off_y;
                         }
                         else
                         {
-                                int drag_w = strlen(app.entries[drag_idx].name) + 14;
-                                if (drag_w < 20)
-                                        drag_w = 20;
-
-                                int off_x = app.list.drag_off_x;
-                                if (off_x > drag_w - 3)
-                                        off_x = drag_w - 3;
-
-                                int fx = term_mouse.x - off_x;
-                                int fy = term_mouse.y - app.list.drag_off_y;
-
-                                draw_item_list(&app, drag_idx, fx, fy, drag_w, 1, false, false, false, false);
+                                fx = (int)app.list.kb_drag_x;
+                                fy = (int)app.list.kb_drag_y;
                         }
-                }
-                else if (app.list.is_kb_dragging && app.list.kb_drag_idx >= 0 && app.list.kb_drag_idx < app.count && strcmp(app.entries[app.list.kb_drag_idx].name, "..") != 0)
-                {
-                        int drag_idx = app.list.kb_drag_idx;
-                        int fx = (int)app.list.kb_drag_x;
-                        int fy = (int)app.list.kb_drag_y;
 
                         if (app.list.mode == UI_MODE_GRID)
                         {
-                                draw_item_grid(&app, drag_idx, fx, fy, params.cell_w, params.cell_h, false, false, false, false);
+                                draw_item_grid(&app, current_drag, fx, fy, params.cell_w, params.cell_h, false, false, false, false, false);
+                                drag_w = params.cell_w;
                         }
                         else
                         {
-                                int drag_w = strlen(app.entries[drag_idx].name) + 14;
+                                drag_w = strlen(app.entries[current_drag].name) + 14;
                                 if (drag_w < 20)
                                         drag_w = 20;
 
-                                draw_item_list(&app, drag_idx, fx, fy, drag_w, 1, false, false, false, false);
+                                if (app.list.is_dragging)
+                                {
+                                        int off_x = app.list.drag_off_x;
+                                        if (off_x > drag_w - 3)
+                                                off_x = drag_w - 3;
+                                        fx = term_mouse.x - off_x;
+                                }
+
+                                draw_item_list(&app, current_drag, fx, fy, drag_w, 1, false, false, false, false, false);
+                        }
+
+                        if (drag_count > 1)
+                        {
+                                char badge[16];
+                                snprintf(badge, sizeof(badge), " +%d ", drag_count - 1);
+                                int bx = app.list.mode == UI_MODE_GRID ? fx + drag_w - 4 : fx + drag_w + 1;
+                                int by = app.list.mode == UI_MODE_GRID ? fy - 1 : fy;
+                                ui_text(bx, by, badge, (Color){255, 255, 255}, (Color){200, 50, 50}, true, false);
                         }
                 }
 

@@ -87,6 +87,14 @@ typedef struct
         int kb_drag_idx;
         bool is_kb_dragging;
         float kb_drag_x, kb_drag_y;
+
+        bool is_box_selecting;
+        int box_start_x;
+        float box_start_y_world;
+
+        bool *selections;
+        bool *active_box_selections;
+        int selections_cap;
 } UIListState;
 
 typedef struct
@@ -106,6 +114,7 @@ typedef struct
         bool right_clicked;
         bool is_ghost;
         bool is_drop_target;
+        bool is_selected;
 } UIItemResult;
 
 Mouse term_mouse;
@@ -235,7 +244,6 @@ int term_init(void)
         signal(SIGWINCH, on_resize);
         return 1;
 }
-
 int term_poll(int timeout_ms)
 {
         struct pollfd fds[2] = {{STDIN_FILENO, POLLIN, 0}, {fd_m, POLLIN, 0}};
@@ -332,10 +340,21 @@ int term_poll(int timeout_ms)
                                                 term_mouse.y = y - 1;
                                                 term_mouse.has_sub = false;
                                                 bool d = (m == 'M');
-                                                if (b == 0 || b == 32)
+
+                                                if (m == 'm' || b == 3 || b == 35)
+                                                {
+                                                        term_mouse.left = false;
+                                                        term_mouse.right = false;
+                                                }
+                                                else if (b == 0 || b == 32)
+                                                {
                                                         term_mouse.left = d;
-                                                if (b == 2 || b == 34)
+                                                }
+                                                else if (b == 2 || b == 34)
+                                                {
                                                         term_mouse.right = d;
+                                                }
+
                                                 if (b == 64 && d)
                                                         term_mouse.wheel--;
                                                 if (b == 65 && d)
@@ -585,6 +604,18 @@ void ui_end(void)
         fflush(stdout);
 }
 
+void ui_list_clear_selections(UIListState *s)
+{
+        if (s->selections && s->selections_cap > 0)
+        {
+                memset(s->selections, 0, s->selections_cap * sizeof(bool));
+        }
+        if (s->active_box_selections && s->selections_cap > 0)
+        {
+                memset(s->active_box_selections, 0, s->selections_cap * sizeof(bool));
+        }
+}
+
 void ui_list_reset(UIListState *s)
 {
         s->target_scroll = 0;
@@ -609,6 +640,12 @@ void ui_list_reset(UIListState *s)
         s->is_kb_dragging = false;
         s->kb_drag_x = 0;
         s->kb_drag_y = 0;
+
+        s->is_box_selecting = false;
+        s->box_start_x = 0;
+        s->box_start_y_world = 0;
+
+        ui_list_clear_selections(s);
 }
 
 void ui_list_set_mode(UIListState *s, const UIListParams *p, UIListMode mode)
@@ -625,6 +662,7 @@ void ui_list_set_mode(UIListState *s, const UIListParams *p, UIListMode mode)
                 s->current_scroll = s->target_scroll;
         }
 }
+
 void ui_list_begin(UIListState *s, const UIListParams *p, int key)
 {
         s->p = *p;
@@ -634,6 +672,38 @@ void ui_list_begin(UIListState *s, const UIListParams *p, int key)
         s->action_drop_dst = -1;
         s->action_click_idx = -1;
         s->drop_target_idx = -1;
+
+        if (p->item_count > s->selections_cap)
+        {
+                s->selections = realloc(s->selections, p->item_count * sizeof(bool));
+                s->active_box_selections = realloc(s->active_box_selections, p->item_count * sizeof(bool));
+                for (int i = s->selections_cap; i < p->item_count; i++)
+                {
+                        s->selections[i] = false;
+                        s->active_box_selections[i] = false;
+                }
+                s->selections_cap = p->item_count;
+        }
+
+        if (s->active_box_selections && s->selections_cap > 0)
+        {
+                memset(s->active_box_selections, 0, s->selections_cap * sizeof(bool));
+        }
+
+        if (key == ' ')
+        {
+                if (s->selected_idx >= 0 && s->selected_idx < p->item_count)
+                {
+                        s->selections[s->selected_idx] = !s->selections[s->selected_idx];
+                }
+        }
+
+        if (key == KEY_ESC)
+        {
+                ui_list_clear_selections(s);
+                s->is_kb_dragging = false;
+                s->kb_drag_idx = -1;
+        }
 
         if (key == '\t')
         {
@@ -661,12 +731,6 @@ void ui_list_begin(UIListState *s, const UIListParams *p, int key)
                         s->action_drop_src = s->kb_drag_idx;
                         s->action_drop_dst = s->selected_idx;
                 }
-                s->is_kb_dragging = false;
-                s->kb_drag_idx = -1;
-        }
-
-        if (key == KEY_ESC && s->is_kb_dragging)
-        {
                 s->is_kb_dragging = false;
                 s->kb_drag_idx = -1;
         }
@@ -878,6 +942,23 @@ bool ui_list_do_item(UIListState *s, int index, UIItemResult *res)
         int screen_x = s->p.x + (index % cols) * c_w;
         int screen_y = s->p.y + (index / cols * c_h) - (int)(s->current_scroll + 0.5f);
 
+        float item_world_y = s->p.y + (index / cols * c_h);
+
+        if (s->is_box_selecting)
+        {
+                int bx = s->box_start_x < term_mouse.x ? s->box_start_x : term_mouse.x;
+                int bw = abs(term_mouse.x - s->box_start_x) + 1;
+
+                float current_world_y = term_mouse.y + s->current_scroll;
+                float world_by = s->box_start_y_world < current_world_y ? s->box_start_y_world : current_world_y;
+                float world_bh = ui_fabsf(current_world_y - s->box_start_y_world) + 1;
+
+                if (screen_x < bx + bw && screen_x + c_w > bx && item_world_y < world_by + world_bh && item_world_y + c_h > world_by)
+                {
+                        s->active_box_selections[index] = true;
+                }
+        }
+
         if (screen_y + c_h <= s->p.y || screen_y >= s->p.y + s->p.h)
                 return false;
 
@@ -892,10 +973,27 @@ bool ui_list_do_item(UIListState *s, int index, UIItemResult *res)
                              term_mouse.x >= global_ctx.x && term_mouse.x < global_ctx.x + global_ctx.w &&
                              term_mouse.y >= global_ctx.y && term_mouse.y < global_ctx.y + global_ctx.h;
 
-        res->hovered = (!over_ctx_menu && !s->dragging_scroll &&
+        res->hovered = (!over_ctx_menu && !s->dragging_scroll && !s->is_box_selecting &&
                         term_mouse.x >= screen_x && term_mouse.x < screen_x + c_w &&
                         term_mouse.y >= screen_y && term_mouse.y < screen_y + c_h &&
                         term_mouse.y >= s->p.y && term_mouse.y < s->p.y + s->p.h && term_mouse.x < s->p.x + s->p.w - 1);
+
+        bool is_hit = true;
+        if (s->mode == UI_MODE_GRID)
+        {
+                if (term_mouse.x == screen_x || term_mouse.x == screen_x + c_w - 1 ||
+                    term_mouse.y == screen_y || term_mouse.y == screen_y + c_h - 1)
+                {
+                        is_hit = false;
+                }
+        }
+        else
+        {
+                if (term_mouse.x > screen_x + 35)
+                {
+                        is_hit = false;
+                }
+        }
 
         res->pressed = (res->hovered && term_mouse.left);
         res->clicked = (res->hovered && term_mouse.clicked);
@@ -904,10 +1002,11 @@ bool ui_list_do_item(UIListState *s, int index, UIItemResult *res)
         if (res->clicked || res->right_clicked)
         {
                 s->selected_idx = index;
-                s->clicked_on_item = true;
+                if (is_hit)
+                        s->clicked_on_item = true;
         }
 
-        if (res->hovered && term_mouse.clicked && s->drag_idx == -1 && !s->dragging_scroll && !global_ctx.active)
+        if (res->hovered && term_mouse.clicked && is_hit && s->drag_idx == -1 && !s->dragging_scroll && !global_ctx.active)
         {
                 s->drag_idx = index;
                 s->drag_start_x = term_mouse.x;
@@ -915,6 +1014,8 @@ bool ui_list_do_item(UIListState *s, int index, UIItemResult *res)
                 s->drag_off_x = term_mouse.x - screen_x;
                 s->drag_off_y = term_mouse.y - screen_y;
         }
+
+        res->is_selected = s->selections[index] || s->active_box_selections[index];
 
         res->is_ghost = (s->is_dragging && s->drag_idx == index) || (s->is_kb_dragging && s->kb_drag_idx == index);
         res->is_drop_target = (s->is_dragging && res->hovered && index != s->drag_idx) || (s->is_kb_dragging && s->selected_idx == index && index != s->kb_drag_idx);
@@ -940,6 +1041,50 @@ void ui_list_end(UIListState *s)
                     term_mouse.y >= s->p.y && term_mouse.y < s->p.y + s->p.h)
                 {
                         s->selected_idx = -1;
+                        ui_list_clear_selections(s);
+                        s->is_box_selecting = true;
+                        s->box_start_x = term_mouse.x;
+                        s->box_start_y_world = term_mouse.y + s->current_scroll;
+                }
+        }
+
+        if (s->is_box_selecting)
+        {
+                int start_screen_y = (int)(s->box_start_y_world - s->current_scroll);
+                int curr_screen_y = term_mouse.y;
+
+                int bx = s->box_start_x < term_mouse.x ? s->box_start_x : term_mouse.x;
+                int by = start_screen_y < curr_screen_y ? start_screen_y : curr_screen_y;
+                int bw = abs(term_mouse.x - s->box_start_x) + 1;
+                int bh = abs(curr_screen_y - start_screen_y) + 1;
+
+                Color box_clr = {60, 100, 180};
+
+                for (int x = bx; x < bx + bw; x++)
+                {
+                        if (x >= 0 && x < term_width && by >= s->p.y && by < s->p.y + s->p.h)
+                                canvas[by * term_width + x].bg = box_clr;
+                        if (x >= 0 && x < term_width && by + bh - 1 >= s->p.y && by + bh - 1 < s->p.y + s->p.h)
+                                canvas[(by + bh - 1) * term_width + x].bg = box_clr;
+                }
+                for (int y = by; y < by + bh; y++)
+                {
+                        if (bx >= 0 && bx < term_width && y >= s->p.y && y < s->p.y + s->p.h)
+                                canvas[y * term_width + bx].bg = box_clr;
+                        if (bx + bw - 1 >= 0 && bx + bw - 1 < term_width && y >= s->p.y && y < s->p.y + s->p.h)
+                                canvas[y * term_width + bx + bw - 1].bg = box_clr;
+                }
+
+                if (!term_mouse.left)
+                {
+                        for (int i = 0; i < s->p.item_count; i++)
+                        {
+                                if (s->active_box_selections[i])
+                                {
+                                        s->selections[i] = true;
+                                }
+                        }
+                        s->is_box_selecting = false;
                 }
         }
 
