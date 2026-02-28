@@ -68,6 +68,11 @@ typedef struct
         UIListMode mode;
         UIListParams p;
         bool *selections, *active_box_selections;
+
+        float carry_x, carry_y, pickup_anim, drop_anim, fly_anim;
+        int fly_origin_x, fly_origin_y, drop_dst_x, drop_dst_y;
+
+        bool fly_is_pickup, drop_to_target, carrying;
 } UIListState;
 
 typedef struct
@@ -88,12 +93,29 @@ float term_dt_scale = 1.0f;
 
 static struct termios orig_termios;
 static volatile int resize_flag = 1;
-static Cell *canvas = NULL, *last_canvas = NULL;
-static int fd_m = -1, raw_mx, raw_my, color_mode = 0;
-static bool is_evdev = false;
-static char out_buf[1024 * 1024]; // Statics are zero-initialized by the BSS segment, 'raw' is invalid here.
+static Cell *canvas, *last_canvas;
+static int fd_m = -1, raw_mx, raw_my, color_mode;
+static bool is_evdev;
+static char out_buf[1024 * 1024];
 static UIContextState global_ctx;
 static int global_ctx_target = -1;
+
+typedef struct
+{
+        int x, y, w, h;
+} UIRect;
+
+UIRect ui_list_item_rect(const UIListState *s, int index)
+{
+        int cols = (s->mode == UI_MODE_LIST) ? 1 : ((s->p.w - 1) / s->p.cell_w > 0 ? (s->p.w - 1) / s->p.cell_w : 1);
+        int c_w = (s->mode == UI_MODE_LIST) ? s->p.w - 1 : s->p.cell_w;
+        int c_h = (s->mode == UI_MODE_LIST) ? 1 : s->p.cell_h;
+        return (UIRect){
+            .x = s->p.x + (index % cols) * c_w,
+            .y = s->p.y + (index / cols * c_h) - (int)(s->current_scroll + 0.5f),
+            .w = c_w,
+            .h = c_h};
+}
 
 static void on_resize(int s) { resize_flag = 1; }
 static void on_sigint(int s)
@@ -129,7 +151,6 @@ static int rgb256(Color c) { return 16 + (36 * (c.r * 5 / 255)) + (6 * (c.g * 5 
 static int rgb_to_ansi16(Color c, bool is_bg)
 {
         int r = c.r > 127 ? 1 : 0, g = c.g > 127 ? 1 : 0, b = c.b > 127 ? 1 : 0;
-
         if (!r && !g && !b && (c.r || c.g || c.b))
         {
                 if (c.r >= c.g && c.r >= c.b)
@@ -139,7 +160,6 @@ static int rgb_to_ansi16(Color c, bool is_bg)
                 else
                         b = 1;
         }
-
         int bright = (c.r > 170 || c.g > 170 || c.b > 170) ? 1 : 0;
         return (is_bg ? (bright ? 100 : 40) : (bright ? 90 : 30)) + (r | (g << 1) | (b << 2));
 }
@@ -371,7 +391,7 @@ int term_poll(int timeout_ms)
 
 void ui_begin(void)
 {
-        static long long last_time = 0;
+        static long long last_time;
         struct timeval tv;
         gettimeofday(&tv, NULL);
         long long now_us = (long long)tv.tv_sec * 1000000 + tv.tv_usec;
@@ -386,7 +406,6 @@ void ui_begin(void)
         static int cw, ch;
         if (term_width != cw || term_height != ch)
         {
-                // Fixed: Arbitrary block code requires {} with orelse
                 canvas = realloc(canvas, term_width * term_height * sizeof(Cell)) orelse { exit(1); };
                 last_canvas = realloc(last_canvas, term_width * term_height * sizeof(Cell)) orelse { exit(1); };
                 memset(last_canvas, 0, term_width * term_height * sizeof(Cell));
@@ -436,10 +455,8 @@ void ui_text(int x, int y, const char *txt, Color fg, Color bg, bool bold, bool 
                                 c->ch[actual_len++] = txt[i + j];
                 }
                 else
-                {
                         for (int j = 0; j < len && txt[i + j]; j++)
                                 actual_len++;
-                }
                 i += actual_len > 0 ? actual_len : 1;
         }
 }
@@ -525,11 +542,29 @@ void ui_list_reset(UIListState *s)
         bool *sel = s->selections, *box = s->active_box_selections;
         int cap = s->selections_cap;
 
+        float carry_x = s->carry_x, carry_y = s->carry_y, pickup_anim = s->pickup_anim, drop_anim = s->drop_anim, fly_anim = s->fly_anim;
+        int fly_origin_x = s->fly_origin_x, fly_origin_y = s->fly_origin_y, drop_dst_x = s->drop_dst_x, drop_dst_y = s->drop_dst_y;
+        bool fly_is_pickup = s->fly_is_pickup, drop_to_target = s->drop_to_target, carrying = s->carrying;
+
         *s = (UIListState){0};
 
         s->selections = sel;
         s->active_box_selections = box;
         s->selections_cap = cap;
+
+        s->carry_x = carry_x;
+        s->carry_y = carry_y;
+        s->pickup_anim = pickup_anim;
+        s->drop_anim = drop_anim;
+        s->fly_anim = fly_anim;
+        s->fly_origin_x = fly_origin_x;
+        s->fly_origin_y = fly_origin_y;
+        s->drop_dst_x = drop_dst_x;
+        s->drop_dst_y = drop_dst_y;
+        s->fly_is_pickup = fly_is_pickup;
+        s->drop_to_target = drop_to_target;
+        s->carrying = carrying;
+
         s->selected_idx = s->drag_idx = s->drop_target_idx = s->action_drop_src = s->action_drop_dst = s->action_click_idx = s->kb_drag_idx = -1;
         ui_list_clear_selections(s);
 }
@@ -573,7 +608,6 @@ void ui_list_begin(UIListState *s, const UIListParams *p, int key)
 
         if (s->selections_cap > 0)
                 memset(s->active_box_selections, 0, s->selections_cap * sizeof(bool));
-
         if (key == ' ' && s->selected_idx >= 0 && s->selected_idx < p->item_count)
                 s->selections[s->selected_idx] = !s->selections[s->selected_idx];
 
@@ -633,20 +667,15 @@ void ui_list_begin(UIListState *s, const UIListParams *p, int key)
                 s->last_nav_time = now_ms;
         }
         else if (key != 0)
-        {
                 s->last_nav_key = s->nav_key_streak = 0;
-        }
 
         int step = (s->nav_key_streak > 30) ? ((s->mode == UI_MODE_LIST) ? 25 : 8) : (s->nav_key_streak > 15) ? ((s->mode == UI_MODE_LIST) ? 10 : 4)
                                                                                  : (s->nav_key_streak > 5)    ? ((s->mode == UI_MODE_LIST) ? 3 : 2)
                                                                                                               : 1;
-
         int old_idx = s->selected_idx;
 
         if (s->selected_idx == -1 && s->p.item_count > 0 && (key >= KEY_UP && key <= KEY_SHIFT_PAGE_DOWN))
-        {
                 s->selected_idx = 0;
-        }
         else if (s->selected_idx >= 0)
         {
                 if (key == KEY_RIGHT)
@@ -708,7 +737,6 @@ void ui_list_begin(UIListState *s, const UIListParams *p, int key)
 
                 if (vel_dir != 0.0f && vel_dir != wheel_dir)
                         s->scroll_velocity = 0.0f;
-
                 if (vel_dir == wheel_dir && ui_fabsf(s->scroll_velocity) > 0.05f)
                         base_power *= (2.5f + ui_fabsf(s->scroll_velocity) * 1.2f);
                 s->scroll_velocity += term_mouse.wheel * base_power;
@@ -722,10 +750,8 @@ void ui_list_begin(UIListState *s, const UIListParams *p, int key)
                 global_ctx.active = false;
                 global_ctx.w = 0;
         }
-
         if (s->scroll_velocity > -0.05f && s->scroll_velocity < 0.05f)
                 s->scroll_velocity = 0.0f;
-
         if (s->target_scroll > max_scroll)
         {
                 s->target_scroll = max_scroll;
@@ -739,9 +765,9 @@ void ui_list_begin(UIListState *s, const UIListParams *p, int key)
 
         if (!s->dragging_scroll && s->scroll_velocity == 0.0f)
         {
-                float snap_target = (float)(((int)(s->target_scroll + (c_h / 2.0f)) / c_h) * c_h);
-                if (snap_target <= max_scroll)
-                        s->target_scroll = snap_target;
+                float snap = (float)(((int)(s->target_scroll + (c_h / 2.0f)) / c_h) * c_h);
+                if (snap <= max_scroll)
+                        s->target_scroll = snap;
         }
 
         if (!s->dragging_scroll)
@@ -750,27 +776,12 @@ void ui_list_begin(UIListState *s, const UIListParams *p, int key)
                 if (s->target_scroll - s->current_scroll > -0.05f && s->target_scroll - s->current_scroll < 0.05f)
                         s->current_scroll = s->target_scroll;
         }
-
-        if (s->is_kb_dragging && s->selected_idx != -1)
-        {
-                int c_w = (s->mode == UI_MODE_LIST) ? s->p.w - 1 : s->p.cell_w;
-                float target_x = s->p.x + (s->selected_idx % cols) * c_w + (s->mode == UI_MODE_LIST ? 4 : c_w / 2);
-                float target_y = s->p.y + (s->selected_idx / cols * c_h) - s->current_scroll + (s->mode == UI_MODE_LIST ? 0 : c_h / 2);
-                float lerp = 1.0f - ui_powf(0.6f, term_dt_scale);
-                s->kb_drag_x += (target_x - s->kb_drag_x) * lerp;
-                s->kb_drag_y += (target_y - s->kb_drag_y) * lerp;
-        }
 }
 
 bool ui_list_do_item(UIListState *s, int index, UIItemResult *res)
 {
-        int cols = (s->mode == UI_MODE_LIST) ? 1 : ((s->p.w - 1) / s->p.cell_w > 0 ? (s->p.w - 1) / s->p.cell_w : 1);
-        int c_w = (s->mode == UI_MODE_LIST) ? s->p.w - 1 : s->p.cell_w;
-        int c_h = (s->mode == UI_MODE_LIST) ? 1 : s->p.cell_h;
-
-        int screen_x = s->p.x + (index % cols) * c_w;
-        int screen_y = s->p.y + (index / cols * c_h) - (int)(s->current_scroll + 0.5f);
-        float item_world_y = s->p.y + (index / cols * c_h);
+        UIRect r = ui_list_item_rect(s, index);
+        float item_world_y = s->p.y + (index / (s->mode == UI_MODE_LIST ? 1 : ((s->p.w - 1) / s->p.cell_w > 0 ? (s->p.w - 1) / s->p.cell_w : 1)) * r.h);
 
         if (s->is_box_selecting)
         {
@@ -779,25 +790,18 @@ bool ui_list_do_item(UIListState *s, int index, UIItemResult *res)
                 float world_by = s->box_start_y_world < (term_mouse.y + s->current_scroll) ? s->box_start_y_world : (term_mouse.y + s->current_scroll);
                 float world_bh = ui_fabsf((term_mouse.y + s->current_scroll) - s->box_start_y_world) + 1;
 
-                if (screen_x < bx + bw && screen_x + c_w > bx && item_world_y < world_by + world_bh && item_world_y + c_h > world_by)
+                if (r.x < bx + bw && r.x + r.w > bx && item_world_y < world_by + world_bh && item_world_y + r.h > world_by)
                         s->active_box_selections[index] = true;
         }
 
-        if (screen_y + c_h <= s->p.y || screen_y >= s->p.y + s->p.h)
+        if (r.y + r.h <= s->p.y || r.y >= s->p.y + s->p.h)
                 return false;
+        *res = (UIItemResult){.x = r.x, .y = r.y, .w = r.w, .h = r.h};
 
-        *res = (UIItemResult){.x = screen_x, .y = screen_y, .w = c_w, .h = c_h};
+        bool over_ctx_menu = global_ctx.active && (s != &global_ctx.list) && term_mouse.x >= global_ctx.x && term_mouse.x < global_ctx.x + global_ctx.w && term_mouse.y >= global_ctx.y && term_mouse.y < global_ctx.y + global_ctx.h;
+        res->hovered = (!s->ignore_mouse && !over_ctx_menu && !s->dragging_scroll && !s->is_box_selecting && term_mouse.x >= r.x && term_mouse.x < r.x + r.w && term_mouse.y >= r.y && term_mouse.y < r.y + r.h && term_mouse.y >= s->p.y && term_mouse.y < s->p.y + s->p.h && term_mouse.x < s->p.x + s->p.w - 1);
 
-        bool over_ctx_menu = global_ctx.active && (s != &global_ctx.list) &&
-                             term_mouse.x >= global_ctx.x && term_mouse.x < global_ctx.x + global_ctx.w &&
-                             term_mouse.y >= global_ctx.y && term_mouse.y < global_ctx.y + global_ctx.h;
-
-        res->hovered = (!s->ignore_mouse && !over_ctx_menu && !s->dragging_scroll && !s->is_box_selecting &&
-                        term_mouse.x >= screen_x && term_mouse.x < screen_x + c_w &&
-                        term_mouse.y >= screen_y && term_mouse.y < screen_y + c_h &&
-                        term_mouse.y >= s->p.y && term_mouse.y < s->p.y + s->p.h && term_mouse.x < s->p.x + s->p.w - 1);
-
-        bool is_hit = (s->mode == UI_MODE_GRID) ? !(term_mouse.x == screen_x || term_mouse.x == screen_x + c_w - 1 || term_mouse.y == screen_y || term_mouse.y == screen_y + c_h - 1) : (term_mouse.x <= screen_x + 35);
+        bool is_hit = (s->mode == UI_MODE_GRID) ? !(term_mouse.x == r.x || term_mouse.x == r.x + r.w - 1 || term_mouse.y == r.y || term_mouse.y == r.y + r.h - 1) : (term_mouse.x <= r.x + 35);
 
         res->pressed = (res->hovered && term_mouse.left);
         res->clicked = (res->hovered && term_mouse.clicked);
@@ -815,8 +819,8 @@ bool ui_list_do_item(UIListState *s, int index, UIItemResult *res)
                 s->drag_idx = index;
                 s->drag_start_x = term_mouse.x;
                 s->drag_start_y = term_mouse.y;
-                s->drag_off_x = term_mouse.x - screen_x;
-                s->drag_off_y = term_mouse.y - screen_y;
+                s->drag_off_x = term_mouse.x - r.x;
+                s->drag_off_y = term_mouse.y - r.y;
         }
 
         res->is_selected = s->selections[index] || s->active_box_selections[index];
@@ -851,12 +855,10 @@ void ui_list_end(UIListState *s)
         {
                 int start_screen_y = (int)(s->box_start_y_world - s->current_scroll);
                 int curr_screen_y = term_mouse.y;
-
                 int bx = s->box_start_x < term_mouse.x ? s->box_start_x : term_mouse.x;
                 int by = start_screen_y < curr_screen_y ? start_screen_y : curr_screen_y;
                 int bw = abs(term_mouse.x - s->box_start_x) + 1;
                 int bh = abs(curr_screen_y - start_screen_y) + 1;
-
                 Color box_clr = {60, 100, 180};
 
                 for (int x = bx; x < bx + bw; x++)
@@ -887,7 +889,6 @@ void ui_list_end(UIListState *s)
         {
                 bool hover = (!s->dragging_scroll && term_mouse.x == s->p.x + s->p.w - 1 && term_mouse.y >= s->p.y && term_mouse.y < s->p.y + s->p.h);
                 Color thumb_col = s->dragging_scroll ? (Color){255, 255, 255} : s->p.scrollbar_fg;
-
                 int thumb_h_half = (s->p.h * 2) * s->p.h / (rows * c_h);
                 if (thumb_h_half < 2)
                         thumb_h_half = 2;
@@ -906,7 +907,6 @@ void ui_list_end(UIListState *s)
                                                                            : " ";
                         Color fg = (hover && !top_in && !bot_in) ? s->p.scrollbar_fg : thumb_col;
                         Color bg = (top_in && bot_in) ? thumb_col : s->p.scrollbar_bg;
-
                         ui_text(s->p.x + s->p.w - 1, s->p.y + y, ch, fg, bg, false, false);
                 }
         }
@@ -941,6 +941,34 @@ bool ui_list_is_animating(UIListState *s)
         return (diff > 0.01f || diff < -0.01f || s->scroll_velocity > 0.01f || s->scroll_velocity < -0.01f);
 }
 
+void ui_list_tick_animations(UIListState *s, Mouse mouse, float dt_scale, int sel_x, int sel_y, float carry_spd, float fly_spd, float drop_spd)
+{
+        if (s->carrying)
+        {
+                float tx = sel_x + (s->mode == UI_MODE_LIST ? 45 : s->p.cell_w / 2);
+                float ty = sel_y + (s->mode == UI_MODE_LIST ? -1 : s->p.cell_h / 2);
+                s->carry_x += (tx - s->carry_x) * carry_spd;
+                s->carry_y += (ty - s->carry_y) * carry_spd;
+        }
+        else if (s->is_dragging)
+        {
+                s->carry_x = mouse.x - (s->mode == UI_MODE_LIST ? 2 : s->drag_off_x);
+                s->carry_y = mouse.y - (s->mode == UI_MODE_LIST ? 1 : s->drag_off_y);
+        }
+        else if (s->is_kb_dragging)
+        {
+                s->carry_x = s->kb_drag_x;
+                s->carry_y = s->kb_drag_y;
+        }
+
+        if (s->fly_anim > 0.0f)
+                s->fly_anim = (s->fly_anim - fly_spd * dt_scale < 0.0f) ? 0.0f : s->fly_anim - fly_spd * dt_scale;
+        if (s->pickup_anim > 0.0f)
+                s->pickup_anim = (s->pickup_anim - fly_spd * dt_scale < 0.0f) ? 0.0f : s->pickup_anim - fly_spd * dt_scale;
+        if (s->drop_anim > 0.0f)
+                s->drop_anim = (s->drop_anim - drop_spd * dt_scale < 0.0f) ? 0.0f : s->drop_anim - drop_spd * dt_scale;
+}
+
 void ui_context_open(int target_idx)
 {
         global_ctx = (UIContextState){.active = true, .x = term_mouse.x, .y = term_mouse.y, .w = 0};
@@ -957,7 +985,6 @@ void ui_context_close(void)
         global_ctx.active = false;
         global_ctx.w = 0;
 }
-
 bool ui_context_do(const char **items, int count, int *out_idx)
 {
         if (!global_ctx.active)
@@ -988,9 +1015,7 @@ bool ui_context_do(const char **items, int count, int *out_idx)
         }
 
         ui_rect(global_ctx.x, global_ctx.y, global_ctx.w, global_ctx.h, (Color){15, 15, 15});
-
-        UIListParams params = {
-            .x = global_ctx.x, .y = global_ctx.y, .w = global_ctx.w, .h = global_ctx.h, .item_count = count, .cell_w = global_ctx.w, .cell_h = 1, .bg = (Color){15, 15, 15}, .scrollbar_bg = (Color){25, 25, 25}, .scrollbar_fg = (Color){100, 100, 100}};
+        UIListParams params = {.x = global_ctx.x, .y = global_ctx.y, .w = global_ctx.w, .h = global_ctx.h, .item_count = count, .cell_w = global_ctx.w, .cell_h = 1, .bg = (Color){15, 15, 15}, .scrollbar_bg = (Color){25, 25, 25}, .scrollbar_fg = (Color){100, 100, 100}};
 
         ui_list_begin(&global_ctx.list, &params, 0);
         bool action_taken = false;
@@ -1002,7 +1027,8 @@ bool ui_context_do(const char **items, int count, int *out_idx)
                 {
                         Color bg = item.pressed ? (Color){60, 60, 60} : (item.hovered || global_ctx.list.selected_idx == i) ? (Color){35, 35, 35}
                                                                                                                             : (Color){15, 15, 15};
-                        ui_rect(item.x, item.y, params.w - 1, 1, bg);
+                        // Use item.w and item.h natively instead of params!
+                        ui_rect(item.x, item.y, item.w, item.h, bg);
                         ui_text(item.x + 1, item.y, items[i], (Color){255, 255, 255}, bg, false, false);
                         if (item.clicked)
                         {
@@ -1015,14 +1041,11 @@ bool ui_context_do(const char **items, int count, int *out_idx)
         ui_list_end(&global_ctx.list);
 
         if ((term_mouse.clicked || term_mouse.right_clicked) && !action_taken && !global_ctx.list.dragging_scroll)
-        {
-                if (!(term_mouse.x >= global_ctx.x && term_mouse.x < global_ctx.x + params.w &&
-                      term_mouse.y >= global_ctx.y && term_mouse.y < global_ctx.y + params.h))
+                if (!(term_mouse.x >= global_ctx.x && term_mouse.x < global_ctx.x + params.w && term_mouse.y >= global_ctx.y && term_mouse.y < global_ctx.y + params.h))
                 {
                         global_ctx.active = false;
                         global_ctx.w = 0;
                 }
-        }
 
         if (action_taken)
         {
@@ -1048,7 +1071,6 @@ bool ui_text_input(int x, int y, int w, char *buf, size_t buf_size, int key, boo
 
         Color bg = active ? (Color){45, 45, 45} : (Color){20, 20, 20};
         ui_rect(x, y, w, 1, bg);
-
         raw char disp[256];
         snprintf(disp, sizeof(disp), "%s%s", buf, active ? "_" : "");
         ui_text(x + 1, y, disp, (Color){255, 255, 255}, bg, false, false);
