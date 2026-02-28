@@ -933,6 +933,7 @@ void ui_list_begin(UIListState *s, const UIListParams *p, int key)
                 s->kb_drag_y += (target_y - s->kb_drag_y) * lerp;
         }
 }
+
 bool ui_list_do_item(UIListState *s, int index, UIItemResult *res)
 {
         int cols = (s->mode == UI_MODE_LIST) ? 1 : ((s->p.w - 1) / s->p.cell_w > 0 ? (s->p.w - 1) / s->p.cell_w : 1);
