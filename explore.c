@@ -42,17 +42,17 @@ struct AppState
         UIListState list;
         bool quit;
 
-        CarriedFile carried[256];
-        int carried_count;
+        CarriedFile *carried;
+        int carried_count, carried_cap;
 
-        char drop_names[64][256];
-        int drop_count;
+        char (*drop_paths)[PATH_MAX];
+        int drop_count, drop_cap;
 
         int last_hovered_idx;
         FileEntry fly_entry;
 
-        char pop_names[64][256];
-        int pop_count;
+        char (*pop_paths)[PATH_MAX];
+        int pop_count, pop_cap;
         float pop_anim;
         bool pop_is_out;
 };
@@ -67,9 +67,13 @@ void cb_undo_move(void *data)
         for (int i = 0; i < act->count; i++)
         {
                 rename(act->moves[i].new_path, act->moves[i].old_path);
-                char *base = strrchr(act->moves[i].old_path, '/');
-                if (base && act->app->pop_count < 64)
-                        strcpy(act->app->pop_names[act->app->pop_count++], base + 1);
+
+                if (act->app->pop_count >= act->app->pop_cap)
+                {
+                        act->app->pop_cap = act->app->pop_cap ? act->app->pop_cap * 2 : 64;
+                        act->app->pop_paths = realloc(act->app->pop_paths, act->app->pop_cap * PATH_MAX) orelse return;
+                }
+                strcpy(act->app->pop_paths[act->app->pop_count++], act->moves[i].old_path);
         }
 }
 
@@ -83,9 +87,13 @@ void cb_redo_move(void *data)
         for (int i = 0; i < act->count; i++)
         {
                 rename(act->moves[i].old_path, act->moves[i].new_path);
-                char *base = strrchr(act->moves[i].new_path, '/');
-                if (base && act->app->pop_count < 64)
-                        strcpy(act->app->pop_names[act->app->pop_count++], base + 1);
+
+                if (act->app->pop_count >= act->app->pop_cap)
+                {
+                        act->app->pop_cap = act->app->pop_cap ? act->app->pop_cap * 2 : 64;
+                        act->app->pop_paths = realloc(act->app->pop_paths, act->app->pop_cap * PATH_MAX) orelse return;
+                }
+                strcpy(act->app->pop_paths[act->app->pop_count++], act->moves[i].new_path);
         }
 }
 
@@ -188,6 +196,7 @@ void draw_item_list(AppState *app, FileEntry *e, int x, int y, int w, int h, boo
         y += float_y;
 
         Color item_bg = (is_drop_target && e->is_dir) ? (Color){50, 150, 50} : (is_ghost ? (Color){30, 30, 30} : (is_multi_sel ? clr_sel_bg : (is_hover || is_sel ? clr_hover : clr_bg)));
+
         if (is_popping)
         {
                 int flash = (int)(app->pop_anim * 80.0f);
@@ -239,22 +248,22 @@ void draw_item(AppState *app, FileEntry *e, UIItemResult *res, bool is_sel, bool
                 draw_item_list(app, e, res->x, res->y, res->w, res->h, is_sel, res->hovered, is_ghost, res->is_drop_target, res->is_selected, is_dropped, is_popping);
 }
 
-bool is_item_dropped(AppState *app, const char *name)
+bool is_item_dropped(AppState *app, const char *path)
 {
         if (app->list.drop_anim <= 0.01f)
                 return false;
         for (int d = 0; d < app->drop_count; d++)
-                if (!strcmp(name, app->drop_names[d]))
+                if (!strcmp(path, app->drop_paths[d]))
                         return true;
         return false;
 }
 
-bool is_item_carried(AppState *app, const char *name)
+bool is_item_carried(AppState *app, const char *path)
 {
         if (!app->list.carrying)
                 return false;
         for (int c = 0; c < app->carried_count; c++)
-                if (!strcmp(name, app->carried[c].entry.name))
+                if (!strcmp(path, app->carried[c].path))
                         return true;
         return false;
 }
@@ -266,7 +275,6 @@ void app_load_dir(AppState *app, const char *path)
         DIR *d = opendir(path) orelse opendir(".");
         d orelse return;
         defer closedir(d);
-
         (chdir(path) == 0) orelse return;
         getcwd(app->cwd, sizeof(app->cwd)) orelse return;
 
@@ -351,7 +359,12 @@ void handle_input(AppState *app, int *key, const UIListParams *params)
 
         if (*key == KEY_ENTER && app->count > 0 && s->selected_idx >= 0 && app->entries[s->selected_idx].is_dir)
         {
-                strcpy(app->next_dir, app->entries[s->selected_idx].name);
+                raw char sel_path[PATH_MAX];
+                snprintf(sel_path, PATH_MAX, "%s/%s", app->cwd, app->entries[s->selected_idx].name);
+                if (!is_item_carried(app, sel_path))
+                {
+                        strcpy(app->next_dir, app->entries[s->selected_idx].name);
+                }
                 *key = 0;
         }
 
@@ -360,9 +373,12 @@ void handle_input(AppState *app, int *key, const UIListParams *params)
                 int src = s->selected_idx != -1 ? s->selected_idx : app->last_hovered_idx;
                 if (src >= 0 && src < app->count && strcmp(app->entries[src].name, "..") != 0)
                 {
+                        raw char src_path[PATH_MAX];
+                        snprintf(src_path, PATH_MAX, "%s/%s", app->cwd, app->entries[src].name);
+
                         int found_idx = -1;
                         for (int i = 0; i < app->carried_count; i++)
-                                if (!strcmp(app->carried[i].entry.name, app->entries[src].name))
+                                if (!strcmp(app->carried[i].path, src_path))
                                 {
                                         found_idx = i;
                                         break;
@@ -381,11 +397,20 @@ void handle_input(AppState *app, int *key, const UIListParams *params)
                                 if (--app->carried_count == 0)
                                         s->carrying = false;
                         }
-                        else if (app->carried_count < 256)
+                        else
                         {
+                                if (app->carried_count >= app->carried_cap)
+                                {
+                                        app->carried_cap = app->carried_cap ? app->carried_cap * 2 : 256;
+                                        app->carried = realloc(app->carried, app->carried_cap * sizeof(CarriedFile)) orelse
+                                        {
+                                                *key = 0;
+                                                return;
+                                        };
+                                }
                                 s->fly_is_pickup = true;
                                 app->carried[app->carried_count].entry = app->entries[src];
-                                snprintf(app->carried[app->carried_count++].path, PATH_MAX, "%s/%s", app->cwd, app->entries[src].name);
+                                strcpy(app->carried[app->carried_count++].path, src_path);
                         }
                 }
                 *key = 0;
@@ -399,8 +424,17 @@ void handle_input(AppState *app, int *key, const UIListParams *params)
                         s->drop_anim = 1.0f;
                         s->drop_to_target = false;
 
-                        MoveAction *act = malloc(sizeof(MoveAction));
-                        act->moves = malloc(sizeof(FileMove) * app->carried_count);
+                        MoveAction *act = malloc(sizeof(MoveAction)) orelse
+                        {
+                                *key = 0;
+                                return;
+                        };
+                        act->moves = malloc(sizeof(FileMove) * app->carried_count) orelse
+                        {
+                                free(act);
+                                *key = 0;
+                                return;
+                        };
                         act->count = 0;
                         act->app = app;
 
@@ -415,8 +449,12 @@ void handle_input(AppState *app, int *key, const UIListParams *params)
                                 strcpy(act->moves[act->count].new_path, new_path);
                                 act->count++;
 
-                                if (app->drop_count < 64)
-                                        strcpy(app->drop_names[app->drop_count++], app->carried[i].entry.name);
+                                if (app->drop_count >= app->drop_cap)
+                                {
+                                        app->drop_cap = app->drop_cap ? app->drop_cap * 2 : 64;
+                                        app->drop_paths = realloc(app->drop_paths, app->drop_cap * PATH_MAX) orelse continue;
+                                }
+                                strcpy(app->drop_paths[app->drop_count++], new_path);
                         }
 
                         if (act->count > 0)
@@ -442,6 +480,11 @@ void handle_input(AppState *app, int *key, const UIListParams *params)
                                 {
                                         if (strcmp(app->entries[i].name, "..") != 0)
                                         {
+                                                if (app->carried_count >= app->carried_cap)
+                                                {
+                                                        app->carried_cap = app->carried_cap ? app->carried_cap * 2 : 256;
+                                                        app->carried = realloc(app->carried, app->carried_cap * sizeof(CarriedFile)) orelse break;
+                                                }
                                                 app->carried[app->carried_count].entry = app->entries[i];
                                                 snprintf(app->carried[app->carried_count++].path, PATH_MAX, "%s/%s", app->cwd, app->entries[i].name);
                                         }
@@ -486,8 +529,9 @@ void app_process_drops(AppState *app)
                         if (s->selections[i])
                                 drag_multi = true;
 
+        CarriedFile *temp_carried = malloc(sizeof(CarriedFile) * app->count) orelse return;
+        defer free(temp_carried);
         int temp_carried_count = 0;
-        raw CarriedFile temp_carried[256];
 
         app->drop_count = 0;
         s->drop_anim = 1.0f;
@@ -501,12 +545,29 @@ void app_process_drops(AppState *app)
                 temp_carried[temp_carried_count].entry = app->entries[i];
                 snprintf(temp_carried[temp_carried_count].path, PATH_MAX, "%s/%s", app->cwd, app->entries[i].name);
 
-                if (app->drop_count < 64)
-                        strcpy(app->drop_names[app->drop_count++], app->entries[i].name);
+                if (app->drop_count >= app->drop_cap)
+                {
+                        app->drop_cap = app->drop_cap ? app->drop_cap * 2 : 64;
+                        app->drop_paths = realloc(app->drop_paths, app->drop_cap * PATH_MAX) orelse continue;
+                }
+                strcpy(app->drop_paths[app->drop_count++], temp_carried[temp_carried_count].path);
                 temp_carried_count++;
         }
 
-        if (!(dst != -1 && app->entries[dst].is_dir && strcmp(app->entries[dst].name, ".")))
+        bool dst_valid = (dst != -1 && app->entries[dst].is_dir && strcmp(app->entries[dst].name, "."));
+        if (dst_valid)
+        {
+                for (int i = 0; i < temp_carried_count; i++)
+                {
+                        if (dst == src || !strcmp(temp_carried[i].entry.name, app->entries[dst].name))
+                        {
+                                dst_valid = false;
+                                break;
+                        }
+                }
+        }
+
+        if (!dst_valid)
         {
                 s->drop_to_target = false;
                 return;
@@ -517,8 +578,12 @@ void app_process_drops(AppState *app)
         s->drop_dst_y = r.y;
         s->drop_to_target = true;
 
-        MoveAction *act = malloc(sizeof(MoveAction));
-        act->moves = malloc(sizeof(FileMove) * temp_carried_count);
+        MoveAction *act = malloc(sizeof(MoveAction)) orelse return;
+        act->moves = malloc(sizeof(FileMove) * temp_carried_count) orelse
+        {
+                free(act);
+                return;
+        };
         act->count = 0;
         act->app = app;
 
@@ -584,17 +649,23 @@ void app_render_ui(AppState *app, UIListParams *params, int key)
 
                         bool is_sel = (i == s->selected_idx);
 
+                        raw char item_path[PATH_MAX];
+                        snprintf(item_path, PATH_MAX, "%s/%s", app->cwd, app->entries[i].name);
+
                         int current_drag = s->is_dragging ? s->drag_idx : s->kb_drag_idx;
-                        bool is_carried = is_item_carried(app, app->entries[i].name);
-                        bool is_dropped = is_item_dropped(app, app->entries[i].name);
+                        bool is_carried = is_item_carried(app, item_path);
+                        bool is_dropped = is_item_dropped(app, item_path);
                         bool is_picked_up_mouse = (!s->carrying && current_drag != -1 && (s->selections[current_drag] ? s->selections[i] : current_drag == i));
                         bool is_ghost = item.is_ghost || is_picked_up_mouse || is_carried;
+
+                        if (is_ghost)
+                                item.is_drop_target = false;
 
                         bool is_popping = false;
                         if (app->pop_anim > 0.01f)
                         {
                                 for (int p = 0; p < app->pop_count; p++)
-                                        if (!strcmp(app->entries[i].name, app->pop_names[p]))
+                                        if (!strcmp(item_path, app->pop_paths[p]))
                                                 is_popping = true;
                         }
 
@@ -604,10 +675,7 @@ void app_render_ui(AppState *app, UIListParams *params, int key)
                         int anim_x, anim_y;
                         if (pass == 1 && ui_list_get_anim_coords(s, item.x, item.y, is_dropped, is_carried || is_picked_up_mouse, &anim_x, &anim_y))
                         {
-                                UIItemResult anim_res = item;
-                                anim_res.x = anim_x;
-                                anim_res.y = anim_y;
-                                draw_item(app, &app->entries[i], &anim_res, is_sel, false, is_dropped, is_popping);
+                                draw_item_grid(app, &app->entries[i], anim_x, anim_y, 14, 7, is_sel, false, false, false, false, is_dropped, is_popping);
                         }
 
                         if (pass == 0 && item.right_clicked)
@@ -629,14 +697,17 @@ void app_render_ui(AppState *app, UIListParams *params, int key)
         const char *menu_options[] = {"Open", "Rename", "Delete", "Cancel"};
         int selected_action = -1;
         if (ui_context_do(menu_options, 4, &selected_action) && selected_action == 0)
-                if (app->entries[ui_context_target()].is_dir)
+        {
+                raw char ctx_path[PATH_MAX];
+                snprintf(ctx_path, PATH_MAX, "%s/%s", app->cwd, app->entries[ui_context_target()].name);
+                if (app->entries[ui_context_target()].is_dir && !is_item_carried(app, ctx_path))
                         strcpy(app->next_dir, app->entries[ui_context_target()].name);
+        }
 
         int fly_x, fly_y;
         if (ui_list_get_fly_coords(s, &fly_x, &fly_y))
         {
-                UIItemResult f_res = {.x = fly_x, .y = fly_y, .w = ui_list_item_rect(s, 0).w, .h = ui_list_item_rect(s, 0).h};
-                draw_item(app, &app->fly_entry, &f_res, false, false, false, false);
+                draw_item_grid(app, &app->fly_entry, fly_x, fly_y, 14, 7, false, false, false, false, false, false, false);
         }
 
         int current_drag = s->is_dragging ? s->drag_idx : s->kb_drag_idx;
@@ -651,8 +722,7 @@ void app_render_ui(AppState *app, UIListParams *params, int key)
                                         drag_count++;
 
                 FileEntry *ghost_entry = s->carrying ? &app->carried[0].entry : &app->entries[current_drag];
-                UIItemResult c_res = {.x = (int)s->carry_x, .y = (int)s->carry_y, .w = 14, .h = 7};
-                draw_item(app, ghost_entry, &c_res, false, true, false, false);
+                draw_item_grid(app, ghost_entry, (int)s->carry_x, (int)s->carry_y, 14, 7, false, false, true, false, false, false, false);
                 ui_draw_badge((int)s->carry_x + 10, (int)s->carry_y - 1, drag_count == 0 && !s->carrying ? 1 : drag_count);
         }
 }
@@ -666,6 +736,10 @@ int main(void)
         AppState app;
         app.last_hovered_idx = -1;
         defer free(app.entries);
+        defer free(app.carried);
+        defer free(app.drop_paths);
+        defer free(app.pop_paths);
+
         app_load_dir(&app, ".");
 
         bool first_frame = true, was_carrying, was_dragging;
@@ -704,6 +778,22 @@ int main(void)
                         int c_idx = s->selected_idx != -1 ? s->selected_idx : (app.last_hovered_idx != -1 ? app.last_hovered_idx : 0);
                         s->carry_x = ui_list_item_rect(s, c_idx).x;
                         s->carry_y = ui_list_item_rect(s, c_idx).y;
+                }
+
+                if (s->is_dragging && !was_dragging)
+                {
+                        bool drag_multi = s->drag_idx >= 0 && s->selections[s->drag_idx];
+                        for (int i = 0; i < app.count; i++)
+                        {
+                                if ((drag_multi && s->selections[i]) || (!drag_multi && i == s->drag_idx))
+                                {
+                                        if (strcmp(app.entries[i].name, "..") != 0)
+                                        {
+                                                UIRect br = ui_list_item_rect(s, i);
+                                                ui_burst_particles(br.x + br.w / 2, br.y + br.h / 2, drag_multi ? 5 : 15, clr_text);
+                                        }
+                                }
+                        }
                 }
 
                 app_render_ui(&app, &params, key);

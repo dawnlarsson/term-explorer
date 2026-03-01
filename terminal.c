@@ -1050,35 +1050,37 @@ void ui_list_end(UIListState *s)
 
         if (s->is_box_selecting)
         {
-                int start_screen_y = (int)(s->box_start_y_world - s->current_scroll);
-                int curr_screen_y = term_mouse.y;
-                int bx = s->box_start_x < term_mouse.x ? s->box_start_x : term_mouse.x;
-                int by = start_screen_y < curr_screen_y ? start_screen_y : curr_screen_y;
-                int bw = abs(term_mouse.x - s->box_start_x) + 1;
-                int bh = abs(curr_screen_y - start_screen_y) + 1;
-                Color box_clr = {60, 100, 180};
-
-                for (int x = bx; x < bx + bw; x++)
-                {
-                        if (x >= 0 && x < term_width && by >= s->p.y && by < s->p.y + s->p.h)
-                                canvas[by * term_width + x].bg = box_clr;
-                        if (x >= 0 && x < term_width && by + bh - 1 >= s->p.y && by + bh - 1 < s->p.y + s->p.h)
-                                canvas[(by + bh - 1) * term_width + x].bg = box_clr;
-                }
-                for (int y = by; y < by + bh; y++)
-                {
-                        if (bx >= 0 && bx < term_width && y >= s->p.y && y < s->p.y + s->p.h)
-                                canvas[y * term_width + bx].bg = box_clr;
-                        if (bx + bw - 1 >= 0 && bx + bw - 1 < term_width && y >= s->p.y && y < s->p.y + s->p.h)
-                                canvas[y * term_width + bx + bw - 1].bg = box_clr;
-                }
-
                 if (!term_mouse.left)
                 {
                         for (int i = 0; i < s->p.item_count; i++)
                                 if (s->active_box_selections[i])
                                         s->selections[i] = true;
                         s->is_box_selecting = false;
+                }
+                else
+                {
+                        int start_screen_y = (int)(s->box_start_y_world - s->current_scroll);
+                        int curr_screen_y = term_mouse.y;
+                        int bx = s->box_start_x < term_mouse.x ? s->box_start_x : term_mouse.x;
+                        int by = start_screen_y < curr_screen_y ? start_screen_y : curr_screen_y;
+                        int bw = abs(term_mouse.x - s->box_start_x) + 1;
+                        int bh = abs(curr_screen_y - start_screen_y) + 1;
+                        Color box_clr = {60, 100, 180};
+
+                        for (int x = bx; x < bx + bw; x++)
+                        {
+                                if (x >= 0 && x < term_width && by >= s->p.y && by < s->p.y + s->p.h)
+                                        canvas[by * term_width + x].bg = box_clr;
+                                if (x >= 0 && x < term_width && by + bh - 1 >= s->p.y && by + bh - 1 < s->p.y + s->p.h)
+                                        canvas[(by + bh - 1) * term_width + x].bg = box_clr;
+                        }
+                        for (int y = by; y < by + bh; y++)
+                        {
+                                if (bx >= 0 && bx < term_width && y >= s->p.y && y < s->p.y + s->p.h)
+                                        canvas[y * term_width + bx].bg = box_clr;
+                                if (bx + bw - 1 >= 0 && bx + bw - 1 < term_width && y >= s->p.y && y < s->p.y + s->p.h)
+                                        canvas[y * term_width + bx + bw - 1].bg = box_clr;
+                        }
                 }
         }
 
