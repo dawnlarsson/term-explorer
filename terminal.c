@@ -48,7 +48,7 @@ typedef struct
 typedef struct
 {
         int x, y, sub_y, wheel;
-        bool has_sub, left, right, clicked, right_clicked, hide_cursor;
+        bool has_sub, left, right, clicked, right_clicked, hide_cursor, ctrl;
 } Mouse;
 typedef enum
 {
@@ -397,6 +397,7 @@ int term_init(void)
         signal(SIGWINCH, on_resize);
         return 1;
 }
+
 int term_poll(int timeout_ms)
 {
         struct pollfd fds[2] = {{STDIN_FILENO, POLLIN, 0}, {fd_m, POLLIN, 0}};
@@ -416,7 +417,7 @@ int term_poll(int timeout_ms)
         {
                 raw_mx = (term_width / 2) * 8;
                 raw_my = (term_height / 2) * 16;
-                term_mouse = (Mouse){term_width / 2, term_height / 2, 0, 0, false, false, false, false, false, true};
+                term_mouse = (Mouse){term_width / 2, term_height / 2, 0, 0, false, false, false, false, false, true, false};
                 init_mouse = false;
         }
 
@@ -481,17 +482,21 @@ int term_poll(int timeout_ms)
                                 char m;
                                 if (i + 2 < n && buf[i + 2] == '<' && sscanf(buf + i + 3, "%d;%d;%d%c%n", &b, &x, &y, &m, &offset) == 4)
                                 {
-                                        term_mouse = (Mouse){x - 1, y - 1, 0, term_mouse.wheel, false, term_mouse.left, term_mouse.right, false, false, true};
                                         bool d = (m == 'M');
-                                        if (m == 'm' || b == 3 || b == 35)
+                                        bool ctrl = (b & 16) != 0;
+                                        int btn = b & ~28;
+
+                                        term_mouse = (Mouse){x - 1, y - 1, 0, term_mouse.wheel, false, term_mouse.left, term_mouse.right, false, false, true, ctrl};
+
+                                        if (m == 'm' || btn == 3 || btn == 35)
                                                 term_mouse.left = term_mouse.right = false;
-                                        else if (b == 0 || b == 32)
+                                        else if (btn == 0 || btn == 32)
                                                 term_mouse.left = d;
-                                        else if (b == 2 || b == 34)
+                                        else if (btn == 2 || btn == 34)
                                                 term_mouse.right = d;
-                                        if (b == 64 && d)
+                                        if (btn == 64 && d)
                                                 term_mouse.wheel--;
-                                        if (b == 65 && d)
+                                        if (btn == 65 && d)
                                                 term_mouse.wheel++;
                                         i += 3 + offset;
                                         continue;
@@ -772,6 +777,7 @@ void ui_list_set_mode(UIListState *s, const UIListParams *p, UIListMode mode)
                 s->target_scroll = s->current_scroll = (float)((s->selected_idx / cols) * (mode == UI_MODE_LIST ? 1 : p->cell_h));
         }
 }
+
 void ui_list_begin(UIListState *s, const UIListParams *p, int key)
 {
         s->p = *p;
@@ -1008,7 +1014,26 @@ bool ui_list_do_item(UIListState *s, int index, UIItemResult *res)
         {
                 s->selected_idx = index;
                 if (is_hit)
+                {
                         s->clicked_on_item = true;
+                        if (res->clicked)
+                        {
+                                if (term_mouse.ctrl)
+                                {
+                                        s->selections[index] = !s->selections[index];
+                                }
+                                else if (!s->selections[index])
+                                {
+                                        ui_list_clear_selections(s);
+                                        s->selections[index] = true;
+                                }
+                        }
+                        else if (res->right_clicked && !s->selections[index])
+                        {
+                                ui_list_clear_selections(s);
+                                s->selections[index] = true;
+                        }
+                }
         }
 
         if (res->hovered && term_mouse.clicked && is_hit && s->drag_idx == -1 && !s->dragging_scroll && !global_ctx.active)
@@ -1041,7 +1066,8 @@ void ui_list_end(UIListState *s)
                 if (term_mouse.x >= s->p.x && term_mouse.x < s->p.x + s->p.w - 1 && term_mouse.y >= s->p.y && term_mouse.y < s->p.y + s->p.h)
                 {
                         s->selected_idx = -1;
-                        ui_list_clear_selections(s);
+                        if (!term_mouse.ctrl)
+                                ui_list_clear_selections(s);
                         s->is_box_selecting = true;
                         s->box_start_x = term_mouse.x;
                         s->box_start_y_world = term_mouse.y + s->current_scroll;

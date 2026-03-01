@@ -123,7 +123,7 @@ void draw_item_grid(AppState *app, FileEntry *e, int x, int y, int w, int h, boo
                 float_y = app->pop_is_out ? (int)((1.0f - app->pop_anim) * 2.0f) : -(int)(app->pop_anim * 2.0f);
         y += float_y;
 
-        Color item_bg = (is_drop_target && e->is_dir) ? (Color){50, 150, 50} : (is_ghost ? (Color){30, 30, 30} : (is_multi_sel ? clr_sel_bg : (is_hover || is_sel ? clr_hover : clr_bg)));
+        Color item_bg = (is_drop_target && e->is_dir) ? (Color){50, 150, 50} : (is_ghost ? (Color){30, 30, 30} : (is_multi_sel ? ((is_hover || is_sel) ? (Color){65, 105, 165} : clr_sel_bg) : ((is_hover || is_sel) ? clr_hover : clr_bg)));
 
         if (is_popping)
         {
@@ -195,7 +195,7 @@ void draw_item_list(AppState *app, FileEntry *e, int x, int y, int w, int h, boo
                 float_y = app->pop_is_out ? (int)((1.0f - app->pop_anim) * 1.0f) : -(int)(app->pop_anim * 1.0f);
         y += float_y;
 
-        Color item_bg = (is_drop_target && e->is_dir) ? (Color){50, 150, 50} : (is_ghost ? (Color){30, 30, 30} : (is_multi_sel ? clr_sel_bg : (is_hover || is_sel ? clr_hover : clr_bg)));
+        Color item_bg = (is_drop_target && e->is_dir) ? (Color){50, 150, 50} : (is_ghost ? (Color){30, 30, 30} : (is_multi_sel ? ((is_hover || is_sel) ? (Color){65, 105, 165} : clr_sel_bg) : ((is_hover || is_sel) ? clr_hover : clr_bg)));
 
         if (is_popping)
         {
@@ -282,6 +282,21 @@ void app_load_dir(AppState *app, const char *path)
         if (app->count > 0 && app->list.selected_idx >= 0)
                 strcpy(sel, app->entries[app->list.selected_idx].name);
 
+        int saved_sel_count = 0;
+        raw char (*saved_sels)[256] = NULL;
+        if (app->count > 0)
+        {
+                saved_sels = malloc(app->count * 256);
+                if (saved_sels)
+                {
+                        for (int i = 0; i < app->count; i++)
+                        {
+                                if (app->list.selections[i])
+                                        strcpy(saved_sels[saved_sel_count++], app->entries[i].name);
+                        }
+                }
+        }
+
         UIListMode m = app->list.mode;
         ui_list_reset(&app->list);
         app->list.mode = m;
@@ -309,6 +324,40 @@ void app_load_dir(AppState *app, const char *path)
                 e->is_exec = (st.st_mode & S_IXUSR) && !e->is_dir;
         }
         qsort(app->entries, app->count, sizeof(FileEntry), cmp_entries);
+
+        if (saved_sels)
+        {
+                for (int i = 0; i < app->count; i++)
+                {
+                        for (int j = 0; j < saved_sel_count; j++)
+                        {
+                                if (!strcmp(app->entries[i].name, saved_sels[j]))
+                                {
+                                        app->list.selections[i] = true;
+                                        break;
+                                }
+                        }
+                }
+                free(saved_sels);
+        }
+
+        if (app->list.drop_anim > 0.0f)
+        {
+                for (int i = 0; i < app->count; i++)
+                {
+                        raw char p[PATH_MAX];
+                        snprintf(p, PATH_MAX, "%s/%s", app->cwd, app->entries[i].name);
+                        for (int d = 0; d < app->drop_count; d++)
+                        {
+                                if (!strcmp(p, app->drop_paths[d]))
+                                {
+                                        app->list.selections[i] = true;
+                                        app->list.selected_idx = i;
+                                        break;
+                                }
+                        }
+                }
+        }
 
         if (dir_changed && app->count > 0)
         {
