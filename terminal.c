@@ -1107,7 +1107,12 @@ void ui_list_end(UIListState *s)
                 if (term_mouse.left)
                 {
                         if (!s->is_dragging && (ui_fabsf(term_mouse.x - s->drag_start_x) > 0 || ui_fabsf(term_mouse.y - s->drag_start_y) > 0))
+                        {
                                 s->is_dragging = true;
+                                s->pickup_anim = 1.0f;
+                                s->carry_x = term_mouse.x - (s->mode == UI_MODE_LIST ? 2 : s->drag_off_x);
+                                s->carry_y = term_mouse.y - (s->mode == UI_MODE_LIST ? 1 : s->drag_off_y);
+                        }
                 }
                 else
                 {

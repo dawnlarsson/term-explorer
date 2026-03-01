@@ -455,8 +455,17 @@ void handle_input(AppState *app, int *key, const UIListParams *params)
                                 s->carrying = true;
                                 s->pickup_anim = 1.0f;
 
-                                UIRect br = ui_list_item_rect(s, src);
-                                ui_burst_particles(br.x + br.w / 2, br.y + br.h / 2, 15, clr_text);
+                                for (int i = 0; i < app->count; i++)
+                                {
+                                        if ((drag_multi && s->selections[i]) || (!drag_multi && i == src))
+                                        {
+                                                if (strcmp(app->entries[i].name, "..") != 0)
+                                                {
+                                                        UIRect br = ui_list_item_rect(s, i);
+                                                        ui_burst_particles(br.x + br.w / 2, br.y + br.h / 2, drag_multi ? 5 : 15, clr_text);
+                                                }
+                                        }
+                                }
                         }
                 }
                 *key = 0;
@@ -634,7 +643,9 @@ void app_render_ui(AppState *app, UIListParams *params, int key)
         }
 
         int current_drag = s->is_dragging ? s->drag_idx : s->kb_drag_idx;
-        if (s->carrying || (current_drag >= 0 && current_drag < app->count && strcmp(app->entries[current_drag].name, "..")))
+        bool is_carry_valid = s->carrying || (current_drag >= 0 && current_drag < app->count && strcmp(app->entries[current_drag].name, ".."));
+
+        if (is_carry_valid && s->pickup_anim <= 0.01f)
         {
                 int drag_count = s->carrying ? app->carried_count : 0;
                 if (!s->carrying && current_drag >= 0 && s->selections[current_drag])
@@ -693,15 +704,13 @@ int main(void)
 
                 if (s->carrying && !was_carrying)
                 {
-                        s->carry_x = ui_list_item_rect(s, s->selected_idx != -1 ? s->selected_idx : 0).x;
-                        s->carry_y = ui_list_item_rect(s, s->selected_idx != -1 ? s->selected_idx : 0).y;
+                        int c_idx = s->selected_idx != -1 ? s->selected_idx : (app.last_hovered_idx != -1 ? app.last_hovered_idx : 0);
+                        s->carry_x = ui_list_item_rect(s, c_idx).x;
+                        s->carry_y = ui_list_item_rect(s, c_idx).y;
                 }
 
                 app_render_ui(&app, &params, key);
                 app_process_drops(&app);
-
-                if (s->is_dragging && !was_dragging)
-                        s->pickup_anim = 1.0f;
 
                 was_carrying = s->carrying;
                 was_dragging = s->is_dragging;
