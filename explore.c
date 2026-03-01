@@ -81,14 +81,19 @@ void draw_item_grid(AppState *app, FileEntry *e, int x, int y, int w, int h, boo
         if (ext[1] != ' ' && !e->is_dir)
                 ui_text(x + 6, y + 2 + y_off, ext, icon_fg, item_bg, false, true);
 
-        char l1[16], l2[16];
+        raw char l1[16];
+        raw char l2[16];
         int mw = w - 2 > 15 ? 15 : (w - 2 < 0 ? 0 : w - 2);
         int len = strlen(e->name);
 
         strncpy(l1, e->name, mw);
+        l1[mw] = '\0';
+        l2[0] = '\0';
+
         if (len > mw)
         {
                 strncpy(l2, e->name + mw, mw);
+                l2[mw] = '\0';
                 if (len > mw * 2)
                 {
                         l2[mw - 2] = '.';
@@ -108,13 +113,14 @@ void draw_item_list(AppState *app, FileEntry *e, int x, int y, int w, int h, boo
         ui_rect(x, y, w, 1, item_bg);
         ui_text(x + 1, y, e->is_dir ? " ▓]" : " ■", icon_fg, item_bg, false, false);
 
-        char l[256];
+        raw char l[256];
         int copy_len = w - 9 > 255 ? 255 : (w - 9 < 0 ? 0 : w - 9);
         strncpy(l, e->name, copy_len);
+        l[copy_len] = '\0';
 
         ui_text(x + 8, y, l, is_ghost ? icon_fg : clr_text, item_bg, is_dropped, false);
 
-        char size_str[32];
+        raw char size_str[32];
         if (!e->is_dir)
         {
                 off_t s = e->size;
@@ -128,6 +134,14 @@ void draw_item_list(AppState *app, FileEntry *e, int x, int y, int w, int h, boo
                         snprintf(size_str, 32, "%4lld GB", (long long)(s >> 30));
                 ui_text(x + w - 10, y, size_str, is_ghost ? icon_fg : clr_bar, item_bg, false, false);
         }
+}
+
+void draw_item(AppState *app, FileEntry *e, UIItemResult *res, bool is_sel, bool is_ghost, bool is_dropped)
+{
+        if (app->list.mode == UI_MODE_GRID)
+                draw_item_grid(app, e, res->x, res->y, res->w, res->h, is_sel, res->hovered, is_ghost, res->is_drop_target, res->is_selected, is_dropped);
+        else
+                draw_item_list(app, e, res->x, res->y, res->w, res->h, is_sel, res->hovered, is_ghost, res->is_drop_target, res->is_selected, is_dropped);
 }
 
 bool is_item_dropped(AppState *app, const char *name)
@@ -148,14 +162,6 @@ bool is_item_carried(AppState *app, const char *name)
                 if (!strcmp(name, app->carried[c].entry.name))
                         return true;
         return false;
-}
-
-void draw_item(AppState *app, FileEntry *e, int x, int y, int w, int h, bool is_sel, bool is_hover, bool is_ghost, bool is_drop_target, bool is_multi_sel, bool is_dropped)
-{
-        if (app->list.mode == UI_MODE_GRID)
-                draw_item_grid(app, e, x, y, w, h, is_sel, is_hover, is_ghost, is_drop_target, is_multi_sel, is_dropped);
-        else
-                draw_item_list(app, e, x, y, w, h, is_sel, is_hover, is_ghost, is_drop_target, is_multi_sel, is_dropped);
 }
 
 void app_load_dir(AppState *app, const char *path)
@@ -189,8 +195,9 @@ void app_load_dir(AppState *app, const char *path)
                         app->capacity = app->capacity ? app->capacity * 2 : 256;
                         app->entries = realloc(app->entries, app->capacity * sizeof(FileEntry)) orelse break;
                 }
+
                 raw struct stat st;
-                !stat(dir->d_name, &st) orelse continue;
+                (!stat(dir->d_name, &st)) orelse continue;
 
                 FileEntry *e = &app->entries[app->count++];
                 strcpy(e->name, dir->d_name);
@@ -201,29 +208,35 @@ void app_load_dir(AppState *app, const char *path)
         qsort(app->entries, app->count, sizeof(FileEntry), cmp_entries);
 
         if (app->count > 0 && sel[0])
+        {
                 for (int i = 0; i < app->count; i++)
+                {
                         if (!strcmp(app->entries[i].name, sel))
                         {
                                 app->list.selected_idx = i;
                                 break;
                         }
+                }
+        }
 }
+
 void handle_input(AppState *app, int *key, const UIListParams *params)
 {
         UIListState *s = &app->list;
+
         if (*key == 'q' && !s->carrying)
                 app->quit = true;
         if (*key == 'v')
                 ui_list_set_mode(s, params, !s->mode);
-        if (*key == KEY_BACKSPACE) // Unblocked: allow backing out while carrying files!
+        if (*key == KEY_BACKSPACE)
                 strcpy(app->next_dir, "..");
+
         if (*key == KEY_ESC)
         {
                 s->carrying = false;
                 ui_list_clear_selections(s);
         }
 
-        // Reverted: Pure navigation. The files will keep following you!
         if (*key == KEY_ENTER && app->count > 0 && s->selected_idx >= 0 && app->entries[s->selected_idx].is_dir)
         {
                 strcpy(app->next_dir, app->entries[s->selected_idx].name);
@@ -275,7 +288,7 @@ void handle_input(AppState *app, int *key, const UIListParams *params)
                         s->drop_to_target = false;
                         for (int i = 0; i < app->carried_count; i++)
                         {
-                                char new_path[PATH_MAX];
+                                raw char new_path[PATH_MAX];
                                 snprintf(new_path, PATH_MAX, "%s/%s", app->cwd, app->carried[i].entry.name);
                                 rename(app->carried[i].path, new_path);
                                 if (app->drop_count < 64)
@@ -287,7 +300,7 @@ void handle_input(AppState *app, int *key, const UIListParams *params)
                 else
                 {
                         app->carried_count = 0;
-                        bool drag_multi;
+                        bool drag_multi = false;
                         for (int i = 0; i < app->count; i++)
                                 if (s->selections[i])
                                         drag_multi = true;
@@ -314,12 +327,170 @@ void handle_input(AppState *app, int *key, const UIListParams *params)
         }
 }
 
+void app_process_drops(AppState *app)
+{
+        UIListState *s = &app->list;
+
+        if (s->action_click_idx != -1 && app->entries[s->action_click_idx].is_dir)
+                strcpy(app->next_dir, app->entries[s->action_click_idx].name);
+
+        (s->action_drop_src != -1) orelse return;
+
+        int src = s->action_drop_src, dst = s->action_drop_dst;
+        bool drag_multi = false;
+
+        if (src >= 0 && s->selections[src])
+                for (int i = 0; i < app->count; i++)
+                        if (s->selections[i])
+                                drag_multi = true;
+
+        int temp_carried_count = 0;
+        raw CarriedFile temp_carried[256];
+
+        app->drop_count = 0;
+        s->drop_anim = 1.0f;
+
+        for (int i = 0; i < app->count; i++)
+        {
+                ((drag_multi && s->selections[i]) || (!drag_multi && i == src)) orelse continue;
+
+                strcmp(app->entries[i].name, "..") orelse continue;
+
+                temp_carried[temp_carried_count].entry = app->entries[i];
+                snprintf(temp_carried[temp_carried_count].path, PATH_MAX, "%s/%s", app->cwd, app->entries[i].name);
+
+                if (app->drop_count < 64)
+                        strcpy(app->drop_names[app->drop_count++], app->entries[i].name);
+                temp_carried_count++;
+        }
+
+        if (!(dst != -1 && app->entries[dst].is_dir && strcmp(app->entries[dst].name, ".")))
+        {
+                s->drop_to_target = false;
+                return;
+        }
+
+        UIRect r = ui_list_item_rect(s, dst);
+        s->drop_dst_x = r.x;
+        s->drop_dst_y = r.y;
+        s->drop_to_target = true;
+
+        for (int i = 0; i < temp_carried_count; i++)
+        {
+                raw char new_path[PATH_MAX];
+                snprintf(new_path, PATH_MAX, "%s/%s/%s", app->cwd, app->entries[dst].name, temp_carried[i].entry.name);
+                rename(temp_carried[i].path, new_path);
+        }
+        strcpy(app->next_dir, ".");
+}
+
+void app_render_ui(AppState *app, UIListParams *params, int key)
+{
+        UIListState *s = &app->list;
+        ui_list_begin(s, params, key);
+
+        int active_idx = s->selected_idx != -1 ? s->selected_idx : (app->last_hovered_idx == -1 ? 0 : app->last_hovered_idx);
+        UIRect active_r = ui_list_item_rect(s, active_idx);
+
+        ui_list_tick_animations(s, active_r.x, active_r.y);
+
+        for (int pass = 0; pass < 2; pass++)
+        {
+                for (int i = 0; i < app->count; i++)
+                {
+                        UIItemResult item;
+                        UIRect item_r = ui_list_item_rect(s, i);
+
+                        if (pass == 0)
+                        {
+                                ui_list_do_item(s, i, &item) orelse continue;
+                                if (item.hovered)
+                                        app->last_hovered_idx = i;
+                        }
+                        else
+                        {
+                                item = (UIItemResult){.x = item_r.x, .y = item_r.y, .w = item_r.w, .h = item_r.h};
+                        }
+
+                        if (strcmp(app->entries[i].name, "..") == 0)
+                        {
+                                s->selections[i] = false;
+                                item.is_selected = false;
+                                item.is_ghost = false;
+                        }
+
+                        // RESTORED: Checking if this specific item holds the keyboard focus
+                        bool is_sel = (i == s->selected_idx);
+
+                        int current_drag = s->is_dragging ? s->drag_idx : s->kb_drag_idx;
+                        bool is_carried = is_item_carried(app, app->entries[i].name);
+                        bool is_dropped = is_item_dropped(app, app->entries[i].name);
+                        bool is_picked_up_mouse = (!s->carrying && current_drag != -1 && (s->selections[current_drag] ? item.is_selected : current_drag == i));
+                        bool is_ghost = item.is_ghost || is_picked_up_mouse || is_carried;
+
+                        if (pass == 0 && !is_dropped)
+                                draw_item(app, &app->entries[i], &item, is_sel, is_ghost, false);
+
+                        int anim_x, anim_y;
+                        if (pass == 1 && ui_list_get_anim_coords(s, item.x, item.y, is_dropped, is_carried || is_picked_up_mouse, &anim_x, &anim_y))
+                        {
+                                UIItemResult anim_res = item;
+                                anim_res.x = anim_x;
+                                anim_res.y = anim_y;
+                                draw_item(app, &app->entries[i], &anim_res, is_sel, false, is_dropped);
+                        }
+
+                        if (pass == 0 && item.right_clicked)
+                                ui_context_open(i);
+                }
+                if (pass == 0)
+                        ui_list_end(s);
+        }
+
+        ui_rect(0, 0, term_width, params->y, clr_bg);
+        ui_rect(0, 0, term_width, 1, clr_bar);
+        raw char header[PATH_MAX + 20];
+        snprintf(header, sizeof(header), "%s ", app->cwd);
+        ui_text(1, 0, header, (Color){0}, clr_bar, false, false);
+
+        ui_rect(0, term_height - 1, term_width, 1, clr_bar);
+        ui_text(1, term_height - 1, s->carrying ? " Arrows: Navigate | Enter: Drop | 'Tab': Drop Here | Esc: Cancel " : " Arrows: Navigate | Space: Select | Tab: Move | Esc: Cancel | 'q': Quit ", (Color){0}, clr_bar, false, false);
+
+        const char *menu_options[] = {"Open", "Rename", "Delete", "Cancel"};
+        int selected_action = -1;
+        if (ui_context_do(menu_options, 4, &selected_action) && selected_action == 0)
+                if (app->entries[ui_context_target()].is_dir)
+                        strcpy(app->next_dir, app->entries[ui_context_target()].name);
+
+        int fly_x, fly_y;
+        if (ui_list_get_fly_coords(s, &fly_x, &fly_y))
+        {
+                UIItemResult f_res = {.x = fly_x, .y = fly_y, .w = ui_list_item_rect(s, 0).w, .h = ui_list_item_rect(s, 0).h};
+                draw_item(app, &app->fly_entry, &f_res, false, false, false);
+        }
+
+        int current_drag = s->is_dragging ? s->drag_idx : s->kb_drag_idx;
+        if (s->carrying || (current_drag >= 0 && current_drag < app->count && strcmp(app->entries[current_drag].name, "..")))
+        {
+                int drag_count = s->carrying ? app->carried_count : 0;
+                if (!s->carrying && current_drag >= 0 && s->selections[current_drag])
+                        for (int i = 0; i < app->count; i++)
+                                if (s->selections[i])
+                                        drag_count++;
+
+                FileEntry *ghost_entry = s->carrying ? &app->carried[0].entry : &app->entries[current_drag];
+                UIItemResult c_res = {.x = (int)s->carry_x, .y = (int)s->carry_y, .w = 14, .h = 7};
+                draw_item(app, ghost_entry, &c_res, false, true, false);
+                ui_draw_badge((int)s->carry_x + 10, (int)s->carry_y - 1, drag_count == 0 && !s->carrying ? 1 : drag_count);
+        }
+}
+
 int main(void)
 {
         term_init() orelse return 1;
         defer term_restore();
 
-        AppState app;
+        AppState app; // Prism implicitly zero-initializes this!
         app.last_hovered_idx = -1;
         defer free(app.entries);
         app_load_dir(&app, ".");
@@ -329,15 +500,13 @@ int main(void)
         while (!app.quit)
         {
                 UIListState *s = &app.list;
-                int timeout = (app.next_dir[0] || ui_list_is_animating(s) || s->is_dragging || s->is_kb_dragging || s->is_box_selecting || s->carrying || s->drop_anim > 0.0f || s->fly_anim > 0.0f || s->pickup_anim > 0.0f) ? term_anim_timeout : 1000;
-                if (first_frame)
-                        timeout = 0;
+                int timeout = (app.next_dir[0] || ui_list_is_animating(s)) ? term_anim_timeout : 1000;
 
-                int key = term_poll(timeout);
+                int key = term_poll(first_frame ? 0 : timeout);
                 UIListParams params = {0, 1, term_width, term_height - 2 > 0 ? term_height - 2 : 1, app.count, 14, 7, clr_bg, {30, 30, 30}, clr_bar};
+
                 handle_input(&app, &key, &params);
 
-                // Do not wait for drop_anim if we are dropping into the current grid (!drop_to_target)
                 if (app.next_dir[0] && (s->drop_anim <= 0.01f || !s->drop_to_target))
                 {
                         app_load_dir(&app, app.next_dir);
@@ -347,176 +516,24 @@ int main(void)
                 }
 
                 ui_begin();
+                defer ui_end();
                 ui_clear(clr_bg);
-                ui_list_begin(s, &params, key);
-
-                int active_idx = s->selected_idx != -1 ? s->selected_idx : (app.last_hovered_idx == -1 ? 0 : app.last_hovered_idx);
-                UIRect active_r = ui_list_item_rect(s, active_idx);
 
                 if (s->carrying && !was_carrying)
                 {
-                        s->carry_x = active_r.x;
-                        s->carry_y = active_r.y;
-                }
-                ui_list_tick_animations(s, term_mouse, term_dt_scale, active_r.x, active_r.y, anim_speed_carry, anim_speed_fly, anim_speed_drop);
-
-                for (int pass = 0; pass < 2; pass++)
-                {
-                        for (int i = 0; i < app.count; i++)
-                        {
-                                UIItemResult item;
-                                UIRect item_r = ui_list_item_rect(s, i);
-
-                                if (pass == 0)
-                                {
-                                        ui_list_do_item(s, i, &item) orelse continue;
-                                        if (item.hovered)
-                                                app.last_hovered_idx = i;
-                                }
-                                else
-                                        item = (UIItemResult){.x = item_r.x, .y = item_r.y, .w = item_r.w, .h = item_r.h};
-
-                                if (!strcmp(app.entries[i].name, ".."))
-                                {
-                                        s->selections[i] = false;
-                                        item.is_selected = false;
-                                        item.is_ghost = false;
-                                }
-
-                                int current_drag = s->is_dragging ? s->drag_idx : s->kb_drag_idx;
-                                bool is_sel = (i == s->selected_idx);
-                                bool valid_drop = item.is_drop_target && app.entries[i].is_dir;
-
-                                bool is_carried = is_item_carried(&app, app.entries[i].name);
-                                bool is_dropped = is_item_dropped(&app, app.entries[i].name);
-                                bool is_picked_up_mouse = (!s->carrying && current_drag != -1 && (s->selections[current_drag] ? item.is_selected : current_drag == i));
-                                bool is_ghost = item.is_ghost || is_picked_up_mouse || is_carried;
-
-                                if (pass == 0 && !is_dropped)
-                                        draw_item(&app, &app.entries[i], item.x, item.y, item.w, item.h, is_sel, item.hovered, is_ghost, valid_drop, item.is_selected, false);
-
-                                if (pass == 1 && (is_dropped || ((is_carried || is_picked_up_mouse) && s->pickup_anim > 0.01f)))
-                                {
-                                        float e = is_dropped ? s->drop_anim * s->drop_anim : s->pickup_anim * s->pickup_anim;
-                                        int r_x = is_dropped ? (s->drop_to_target ? s->drop_dst_x + (s->carry_x - s->drop_dst_x) * e : item.x + (s->carry_x - item.x) * e) : s->carry_x + (item.x - s->carry_x) * e;
-                                        int r_y = is_dropped ? (s->drop_to_target ? s->drop_dst_y + (s->carry_y - s->drop_dst_y) * e : item.y + (s->carry_y - item.y) * e) : s->carry_y + (item.y - s->carry_y) * e;
-                                        draw_item(&app, &app.entries[i], r_x, r_y, item_r.w, item_r.h, false, false, false, false, false, is_dropped);
-                                }
-                                if (pass == 0 && item.right_clicked)
-                                        ui_context_open(i);
-                        }
-                        if (pass == 0)
-                                ui_list_end(s);
+                        s->carry_x = ui_list_item_rect(s, s->selected_idx != -1 ? s->selected_idx : 0).x;
+                        s->carry_y = ui_list_item_rect(s, s->selected_idx != -1 ? s->selected_idx : 0).y;
                 }
 
-                if (s->action_click_idx != -1 && app.entries[s->action_click_idx].is_dir)
-                        strcpy(app.next_dir, app.entries[s->action_click_idx].name);
-                if (s->action_drop_src != -1)
-                {
-                        int src = s->action_drop_src, dst = s->action_drop_dst;
-                        bool drag_multi;
-                        if (src >= 0 && s->selections[src])
-                                for (int i = 0; i < app.count; i++)
-                                        if (s->selections[i])
-                                                drag_multi = true;
-
-                        int temp_carried_count;
-                        raw CarriedFile temp_carried[256];
-
-                        app.drop_count = 0;
-                        s->drop_anim = 1.0f;
-
-                        for (int i = 0; i < app.count; i++)
-                        {
-                                if ((drag_multi && s->selections[i]) || (!drag_multi && i == src))
-                                {
-                                        if (strcmp(app.entries[i].name, "..") != 0)
-                                        {
-                                                temp_carried[temp_carried_count].entry = app.entries[i];
-                                                snprintf(temp_carried[temp_carried_count].path, PATH_MAX, "%s/%s", app.cwd, app.entries[i].name);
-                                                if (app.drop_count < 64)
-                                                        strcpy(app.drop_names[app.drop_count++], app.entries[i].name);
-                                                temp_carried_count++;
-                                        }
-                                }
-                        }
-
-                        if (dst != -1 && app.entries[dst].is_dir && strcmp(app.entries[dst].name, ".") != 0)
-                        {
-                                UIRect r = ui_list_item_rect(s, dst);
-                                s->drop_dst_x = r.x;
-                                s->drop_dst_y = r.y;
-                                s->drop_to_target = true;
-
-                                for (int i = 0; i < temp_carried_count; i++)
-                                {
-                                        char new_path[PATH_MAX];
-                                        snprintf(new_path, PATH_MAX, "%s/%s/%s", app.cwd, app.entries[dst].name, temp_carried[i].entry.name);
-                                        rename(temp_carried[i].path, new_path);
-                                }
-                                strcpy(app.next_dir, ".");
-                        }
-                        else
-                                s->drop_to_target = false;
-                }
-
-                ui_rect(0, 0, term_width, params.y, clr_bg);
-                ui_rect(0, 0, term_width, 1, clr_bar);
-                char header[PATH_MAX + 20];
-                snprintf(header, sizeof(header), "%s ", app.cwd);
-                ui_text(1, 0, header, (Color){0}, clr_bar, false, false);
-
-                ui_rect(0, term_height - 1, term_width, 1, clr_bar);
-                ui_text(1, term_height - 1, s->carrying ? " Arrows: Navigate | Enter: Drop into Folder | 'Tab': Drop Here | Space: Pick up/Drop | Esc: Cancel " : " Arrows: Navigate | Space: Select | Tab: Move | Esc: Cancel | 'q': Quit ", (Color){0}, clr_bar, false, false);
-
-                const char *menu_options[] = {"Open", "Rename", "Delete", "Cancel"};
-                int selected_action = -1;
-                if (ui_context_do(menu_options, 4, &selected_action) && selected_action == 0)
-                        if (app.entries[ui_context_target()].is_dir)
-                                strcpy(app.next_dir, app.entries[ui_context_target()].name);
-
-                int current_drag = s->is_dragging ? s->drag_idx : s->kb_drag_idx;
-
-                if (s->fly_anim > 0.0f)
-                {
-                        float ease = s->fly_anim * s->fly_anim;
-                        int fly_x = s->fly_is_pickup ? s->carry_x + (s->fly_origin_x - s->carry_x) * ease : s->fly_origin_x + (s->carry_x - s->fly_origin_x) * ease;
-                        int fly_y = s->fly_is_pickup ? s->carry_y + (s->fly_origin_y - s->carry_y) * ease : s->fly_origin_y + (s->carry_y - s->fly_origin_y) * ease;
-
-                        UIRect f_r = ui_list_item_rect(s, 0);
-                        draw_item(&app, &app.fly_entry, fly_x, fly_y, f_r.w, f_r.h, false, false, false, false, false, false);
-                }
-
-                if (s->carrying || (current_drag >= 0 && current_drag < app.count && strcmp(app.entries[current_drag].name, "..")))
-                {
-                        int drag_count = s->carrying ? app.carried_count : 0;
-                        if (!s->carrying && current_drag >= 0 && s->selections[current_drag])
-                                for (int i = 0; i < app.count; i++)
-                                        if (s->selections[i])
-                                                drag_count++;
-
-                        if (drag_count == 0 && !s->carrying)
-                                drag_count = 1;
-
-                        FileEntry *ghost_entry = s->carrying ? &app.carried[0].entry : &app.entries[current_drag];
-                        draw_item(&app, ghost_entry, (int)s->carry_x, (int)s->carry_y, 14, 7, false, false, true, false, false, false);
-
-                        if (drag_count > 1)
-                        {
-                                char badge[16];
-                                snprintf(badge, sizeof(badge), " %d ", drag_count);
-                                ui_text((int)s->carry_x + 10, (int)s->carry_y - 1, badge, clr_text, (Color){200, 50, 50}, true, false);
-                        }
-                }
-
-                ui_end();
+                app_render_ui(&app, &params, key);
+                app_process_drops(&app);
 
                 if (s->is_dragging && !was_dragging)
                         s->pickup_anim = 1.0f;
+
                 was_carrying = s->carrying;
                 was_dragging = s->is_dragging;
-                if (first_frame)
-                        first_frame = false;
+                first_frame = false;
         }
         return 0;
 }

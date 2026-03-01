@@ -192,19 +192,22 @@ int term_init(void)
         signal(SIGINT, on_sigint);
         signal(SIGTERM, on_sigint);
         signal(SIGQUIT, on_sigint);
-        char *ct = getenv("COLORTERM"), *term = getenv("TERM");
+
+        char *ct = getenv("COLORTERM");
+        char *term = getenv("TERM");
         color_mode = (ct && (!strcmp(ct, "truecolor") || !strcmp(ct, "24bit"))) ? 2 : (term && strstr(term, "256color")) ? 1
                                                                                                                          : 0;
 
 #ifdef __linux__
         for (int i = 0; i < 32 && fd_m < 0; i++)
         {
-                char path[64];
+                raw char path[64];
                 snprintf(path, sizeof(path), "/dev/input/event%d", i);
                 int fd = open(path, O_RDONLY | O_NONBLOCK);
                 (fd >= 0) orelse continue;
 
-                unsigned long ev[EV_MAX / 8 + 1], rel[REL_MAX / 8 + 1];
+                raw unsigned long ev[EV_MAX / 8 + 1];
+                raw unsigned long rel[REL_MAX / 8 + 1];
                 ioctl(fd, EVIOCGBIT(0, sizeof(ev)), ev);
                 ioctl(fd, EVIOCGBIT(EV_REL, sizeof(rel)), rel);
 
@@ -214,11 +217,14 @@ int term_init(void)
                         is_evdev = true;
                 }
                 else
+                {
                         close(fd);
+                }
         }
 #endif
         if (fd_m < 0)
                 fd_m = open("/dev/input/mice", O_RDONLY | O_NONBLOCK);
+
         setvbuf(stdout, out_buf, _IOFBF, sizeof(out_buf));
         printf("\033%%G\033[?25l\033[?7l\033[?1003h\033[?1015h\033[?1006h");
 
@@ -230,7 +236,6 @@ int term_init(void)
         signal(SIGWINCH, on_resize);
         return 1;
 }
-
 int term_poll(int timeout_ms)
 {
         struct pollfd fds[2] = {{STDIN_FILENO, POLLIN, 0}, {fd_m, POLLIN, 0}};
@@ -238,7 +243,7 @@ int term_poll(int timeout_ms)
 
         if (resize_flag)
         {
-                struct winsize ws;
+                raw struct winsize ws;
                 ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws);
                 term_width = ws.ws_col;
                 term_height = ws.ws_row;
@@ -254,7 +259,8 @@ int term_poll(int timeout_ms)
                 init_mouse = false;
         }
 
-        bool last_left = term_mouse.left, last_right = term_mouse.right;
+        bool last_left = term_mouse.left;
+        bool last_right = term_mouse.right;
         term_mouse.wheel = 0;
         int key = 0;
 
@@ -263,7 +269,7 @@ int term_poll(int timeout_ms)
 #ifdef __linux__
                 if (is_evdev)
                 {
-                        struct input_event ev;
+                        raw struct input_event ev;
                         while (read(fd_m, &ev, sizeof(ev)) == sizeof(ev))
                         {
                                 term_mouse.hide_cursor = false;
@@ -282,7 +288,7 @@ int term_poll(int timeout_ms)
                 else
 #endif
                 {
-                        unsigned char m[3];
+                        raw unsigned char m[3];
                         while (read(fd_m, m, 3) == 3)
                         {
                                 term_mouse.hide_cursor = false;
@@ -392,7 +398,7 @@ int term_poll(int timeout_ms)
 void ui_begin(void)
 {
         static long long last_time;
-        struct timeval tv;
+        raw struct timeval tv;
         gettimeofday(&tv, NULL);
         long long now_us = (long long)tv.tv_sec * 1000000 + tv.tv_usec;
 
@@ -580,12 +586,14 @@ void ui_list_set_mode(UIListState *s, const UIListParams *p, UIListMode mode)
                 s->target_scroll = s->current_scroll = (float)((s->selected_idx / cols) * (mode == UI_MODE_LIST ? 1 : p->cell_h));
         }
 }
-
 void ui_list_begin(UIListState *s, const UIListParams *p, int key)
 {
         s->p = *p;
         s->clicked_on_item = false;
-        s->action_drop_src = s->action_drop_dst = s->action_click_idx = s->drop_target_idx = -1;
+        s->action_drop_src = -1;
+        s->action_drop_dst = -1;
+        s->action_click_idx = -1;
+        s->drop_target_idx = -1;
 
         if (term_mouse.x != s->last_mouse_x || term_mouse.y != s->last_mouse_y)
         {
@@ -651,7 +659,7 @@ void ui_list_begin(UIListState *s, const UIListParams *p, int key)
         int rows = (s->p.item_count + cols - 1) / cols;
         int items_per_page = (s->p.h / c_h > 0 ? s->p.h / c_h : 1) * cols;
 
-        struct timeval tv;
+        raw struct timeval tv;
         gettimeofday(&tv, NULL);
         long long now_ms = (long long)tv.tv_sec * 1000 + tv.tv_usec / 1000;
 
@@ -667,7 +675,10 @@ void ui_list_begin(UIListState *s, const UIListParams *p, int key)
                 s->last_nav_time = now_ms;
         }
         else if (key != 0)
-                s->last_nav_key = s->nav_key_streak = 0;
+        {
+                s->last_nav_key = 0;
+                s->nav_key_streak = 0;
+        }
 
         int step = (s->nav_key_streak > 30) ? ((s->mode == UI_MODE_LIST) ? 25 : 8) : (s->nav_key_streak > 15) ? ((s->mode == UI_MODE_LIST) ? 10 : 4)
                                                                                  : (s->nav_key_streak > 5)    ? ((s->mode == UI_MODE_LIST) ? 3 : 2)
@@ -935,14 +946,21 @@ void ui_list_end(UIListState *s)
 
 bool ui_list_is_animating(UIListState *s)
 {
-        if (s->dragging_scroll)
+        if (s->dragging_scroll || s->is_dragging || s->is_kb_dragging || s->is_box_selecting || s->carrying)
                 return true;
+        if (s->drop_anim > 0.0f || s->fly_anim > 0.0f || s->pickup_anim > 0.0f)
+                return true;
+
         float diff = s->target_scroll - s->current_scroll;
         return (diff > 0.01f || diff < -0.01f || s->scroll_velocity > 0.01f || s->scroll_velocity < -0.01f);
 }
 
-void ui_list_tick_animations(UIListState *s, Mouse mouse, float dt_scale, int sel_x, int sel_y, float carry_spd, float fly_spd, float drop_spd)
+void ui_list_tick_animations(UIListState *s, int sel_x, int sel_y)
 {
+        float carry_spd = 0.4f;
+        float fly_spd = 0.15f;
+        float drop_spd = 0.10f;
+
         if (s->carrying)
         {
                 float tx = sel_x + (s->mode == UI_MODE_LIST ? 45 : s->p.cell_w / 2);
@@ -952,8 +970,8 @@ void ui_list_tick_animations(UIListState *s, Mouse mouse, float dt_scale, int se
         }
         else if (s->is_dragging)
         {
-                s->carry_x = mouse.x - (s->mode == UI_MODE_LIST ? 2 : s->drag_off_x);
-                s->carry_y = mouse.y - (s->mode == UI_MODE_LIST ? 1 : s->drag_off_y);
+                s->carry_x = term_mouse.x - (s->mode == UI_MODE_LIST ? 2 : s->drag_off_x);
+                s->carry_y = term_mouse.y - (s->mode == UI_MODE_LIST ? 1 : s->drag_off_y);
         }
         else if (s->is_kb_dragging)
         {
@@ -962,11 +980,35 @@ void ui_list_tick_animations(UIListState *s, Mouse mouse, float dt_scale, int se
         }
 
         if (s->fly_anim > 0.0f)
-                s->fly_anim = (s->fly_anim - fly_spd * dt_scale < 0.0f) ? 0.0f : s->fly_anim - fly_spd * dt_scale;
+                s->fly_anim = (s->fly_anim - fly_spd * term_dt_scale < 0.0f) ? 0.0f : s->fly_anim - fly_spd * term_dt_scale;
         if (s->pickup_anim > 0.0f)
-                s->pickup_anim = (s->pickup_anim - fly_spd * dt_scale < 0.0f) ? 0.0f : s->pickup_anim - fly_spd * dt_scale;
+                s->pickup_anim = (s->pickup_anim - fly_spd * term_dt_scale < 0.0f) ? 0.0f : s->pickup_anim - fly_spd * term_dt_scale;
         if (s->drop_anim > 0.0f)
-                s->drop_anim = (s->drop_anim - drop_spd * dt_scale < 0.0f) ? 0.0f : s->drop_anim - drop_spd * dt_scale;
+                s->drop_anim = (s->drop_anim - drop_spd * term_dt_scale < 0.0f) ? 0.0f : s->drop_anim - drop_spd * term_dt_scale;
+}
+
+bool ui_list_get_anim_coords(UIListState *s, int base_x, int base_y, bool is_dropped, bool is_picked_up, int *out_x, int *out_y)
+{
+        if (is_dropped || (is_picked_up && s->pickup_anim > 0.01f))
+        {
+                float e = is_dropped ? s->drop_anim * s->drop_anim : s->pickup_anim * s->pickup_anim;
+                *out_x = is_dropped ? (s->drop_to_target ? s->drop_dst_x + (s->carry_x - s->drop_dst_x) * e : base_x + (s->carry_x - base_x) * e) : s->carry_x + (base_x - s->carry_x) * e;
+                *out_y = is_dropped ? (s->drop_to_target ? s->drop_dst_y + (s->carry_y - s->drop_dst_y) * e : base_y + (s->carry_y - base_y) * e) : s->carry_y + (base_y - s->carry_y) * e;
+                return true;
+        }
+        return false;
+}
+
+bool ui_list_get_fly_coords(UIListState *s, int *out_x, int *out_y)
+{
+        if (s->fly_anim > 0.0f)
+        {
+                float ease = s->fly_anim * s->fly_anim;
+                *out_x = s->fly_is_pickup ? s->carry_x + (s->fly_origin_x - s->carry_x) * ease : s->fly_origin_x + (s->carry_x - s->fly_origin_x) * ease;
+                *out_y = s->fly_is_pickup ? s->carry_y + (s->fly_origin_y - s->carry_y) * ease : s->fly_origin_y + (s->carry_y - s->fly_origin_y) * ease;
+                return true;
+        }
+        return false;
 }
 
 void ui_context_open(int target_idx)
@@ -985,10 +1027,21 @@ void ui_context_close(void)
         global_ctx.active = false;
         global_ctx.w = 0;
 }
+
+void ui_draw_badge(int x, int y, int count)
+{
+        if (count <= 1)
+                return;
+        raw char badge[16];
+        snprintf(badge, sizeof(badge), " %d ", count);
+        ui_text(x, y, badge, (Color){255, 255, 255}, (Color){200, 50, 50}, true, false);
+}
+
 bool ui_context_do(const char **items, int count, int *out_idx)
 {
         if (!global_ctx.active)
                 return false;
+
         if (global_ctx.w == 0)
         {
                 int max_w = 0;
@@ -1018,27 +1071,26 @@ bool ui_context_do(const char **items, int count, int *out_idx)
         UIListParams params = {.x = global_ctx.x, .y = global_ctx.y, .w = global_ctx.w, .h = global_ctx.h, .item_count = count, .cell_w = global_ctx.w, .cell_h = 1, .bg = (Color){15, 15, 15}, .scrollbar_bg = (Color){25, 25, 25}, .scrollbar_fg = (Color){100, 100, 100}};
 
         ui_list_begin(&global_ctx.list, &params, 0);
+        defer ui_list_end(&global_ctx.list); // Magic cleanup!
+
         bool action_taken = false;
 
         for (int i = 0; i < count; i++)
         {
                 UIItemResult item;
-                if (ui_list_do_item(&global_ctx.list, i, &item))
+                (ui_list_do_item(&global_ctx.list, i, &item)) orelse continue;
+
+                Color bg = item.pressed ? (Color){60, 60, 60} : (item.hovered || global_ctx.list.selected_idx == i) ? (Color){35, 35, 35}
+                                                                                                                    : (Color){15, 15, 15};
+                ui_rect(item.x, item.y, item.w, item.h, bg);
+                ui_text(item.x + 1, item.y, items[i], (Color){255, 255, 255}, bg, false, false);
+
+                if (item.clicked)
                 {
-                        Color bg = item.pressed ? (Color){60, 60, 60} : (item.hovered || global_ctx.list.selected_idx == i) ? (Color){35, 35, 35}
-                                                                                                                            : (Color){15, 15, 15};
-                        // Use item.w and item.h natively instead of params!
-                        ui_rect(item.x, item.y, item.w, item.h, bg);
-                        ui_text(item.x + 1, item.y, items[i], (Color){255, 255, 255}, bg, false, false);
-                        if (item.clicked)
-                        {
-                                *out_idx = i;
-                                action_taken = true;
-                        }
+                        *out_idx = i;
+                        action_taken = true;
                 }
         }
-
-        ui_list_end(&global_ctx.list);
 
         if ((term_mouse.clicked || term_mouse.right_clicked) && !action_taken && !global_ctx.list.dragging_scroll)
                 if (!(term_mouse.x >= global_ctx.x && term_mouse.x < global_ctx.x + params.w && term_mouse.y >= global_ctx.y && term_mouse.y < global_ctx.y + params.h))
