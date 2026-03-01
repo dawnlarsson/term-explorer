@@ -115,7 +115,7 @@ void draw_item_grid(AppState *app, FileEntry *e, int x, int y, int w, int h, boo
                 float_y = app->pop_is_out ? (int)((1.0f - app->pop_anim) * 2.0f) : -(int)(app->pop_anim * 2.0f);
         y += float_y;
 
-        Color item_bg = is_drop_target ? (Color){50, 150, 50} : (is_ghost ? (Color){30, 30, 30} : (is_multi_sel ? clr_sel_bg : (is_hover || is_sel ? clr_hover : clr_bg)));
+        Color item_bg = (is_drop_target && e->is_dir) ? (Color){50, 150, 50} : (is_ghost ? (Color){30, 30, 30} : (is_multi_sel ? clr_sel_bg : (is_hover || is_sel ? clr_hover : clr_bg)));
 
         if (is_popping)
         {
@@ -187,8 +187,7 @@ void draw_item_list(AppState *app, FileEntry *e, int x, int y, int w, int h, boo
                 float_y = app->pop_is_out ? (int)((1.0f - app->pop_anim) * 1.0f) : -(int)(app->pop_anim * 1.0f);
         y += float_y;
 
-        Color item_bg = is_drop_target ? (Color){50, 150, 50} : (is_ghost ? (Color){30, 30, 30} : (is_multi_sel ? clr_sel_bg : (is_hover || is_sel ? clr_hover : clr_bg)));
-
+        Color item_bg = (is_drop_target && e->is_dir) ? (Color){50, 150, 50} : (is_ghost ? (Color){30, 30, 30} : (is_multi_sel ? clr_sel_bg : (is_hover || is_sel ? clr_hover : clr_bg)));
         if (is_popping)
         {
                 int flash = (int)(app->pop_anim * 80.0f);
@@ -264,12 +263,10 @@ void app_load_dir(AppState *app, const char *path)
 {
         bool dir_changed = (strcmp(path, ".") != 0);
 
-        DIR *d = opendir(path) orelse
-        {
-                d = opendir(".");
-                strcpy(app->cwd, ".");
-        };
+        DIR *d = opendir(path) orelse opendir(".");
+        d orelse return;
         defer closedir(d);
+
         (chdir(path) == 0) orelse return;
         getcwd(app->cwd, sizeof(app->cwd)) orelse return;
 
@@ -590,7 +587,7 @@ void app_render_ui(AppState *app, UIListParams *params, int key)
                         int current_drag = s->is_dragging ? s->drag_idx : s->kb_drag_idx;
                         bool is_carried = is_item_carried(app, app->entries[i].name);
                         bool is_dropped = is_item_dropped(app, app->entries[i].name);
-                        bool is_picked_up_mouse = (!s->carrying && current_drag != -1 && (s->selections[current_drag] ? item.is_selected : current_drag == i));
+                        bool is_picked_up_mouse = (!s->carrying && current_drag != -1 && (s->selections[current_drag] ? s->selections[i] : current_drag == i));
                         bool is_ghost = item.is_ghost || is_picked_up_mouse || is_carried;
 
                         bool is_popping = false;

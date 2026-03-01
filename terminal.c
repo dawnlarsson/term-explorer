@@ -306,16 +306,22 @@ static int rgb256(Color c) { return 16 + (36 * (c.r * 5 / 255)) + (6 * (c.g * 5 
 static int rgb_to_ansi16(Color c, bool is_bg)
 {
         int r = c.r > 127 ? 1 : 0, g = c.g > 127 ? 1 : 0, b = c.b > 127 ? 1 : 0;
+        int bright = (c.r > 170 || c.g > 170 || c.b > 170) ? 1 : 0;
+
         if (!r && !g && !b && (c.r || c.g || c.b))
         {
-                if (c.r >= c.g && c.r >= c.b)
+                if (c.r == c.g && c.g == c.b)
+                {
+                        r = g = b = 0;
+                        bright = 1;
+                }
+                else if (c.r >= c.g && c.r >= c.b)
                         r = 1;
                 else if (c.g >= c.r && c.g >= c.b)
                         g = 1;
                 else
                         b = 1;
         }
-        int bright = (c.r > 170 || c.g > 170 || c.b > 170) ? 1 : 0;
         return (is_bg ? (bright ? 100 : 40) : (bright ? 90 : 30)) + (r | (g << 1) | (b << 2));
 }
 
