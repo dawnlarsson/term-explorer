@@ -30,6 +30,11 @@
 #define KEY_ESC 27
 #define KEY_BACKSPACE 127
 
+#define ANIM_SPEED_CARRY 0.4f
+#define ANIM_SPEED_DROP 0.10f
+#define ANIM_SPEED_FLY 0.15f
+#define ANIM_SPEED_POP 0.08f
+
 typedef struct
 {
         int r, g, b;
@@ -87,6 +92,29 @@ typedef struct
         bool hovered, pressed, clicked, right_clicked, is_ghost, is_drop_target, is_selected;
 } UIItemResult;
 
+typedef struct
+{
+        int x, y, w, h;
+} UIRect;
+
+typedef void (*UIActionFn)(void *payload);
+
+typedef struct
+{
+        UIActionFn undo_fn;
+        UIActionFn redo_fn;
+        UIActionFn free_fn;
+        void *payload;
+} UIAction;
+
+typedef struct
+{
+        UIAction stack[512];
+        int head, count;
+} UIHistory;
+
+UIHistory global_history;
+
 Mouse term_mouse;
 int term_width, term_height, term_anim_timeout = 16;
 float term_dt_scale = 1.0f;
@@ -102,8 +130,86 @@ static int global_ctx_target = -1;
 
 typedef struct
 {
-        int x, y, w, h;
-} UIRect;
+        float x, y, vx, vy, life;
+        Color color;
+} UIParticle;
+
+UIParticle term_particles[1024];
+int term_particle_count = 0;
+
+void ui_spawn_particle(float x, float y, float vx, float vy, Color c, float life)
+{
+        if (term_particle_count < 1024)
+                term_particles[term_particle_count++] = (UIParticle){x, y, vx, vy, life, c};
+}
+
+void ui_burst_particles(int cx, int cy, int count, Color c)
+{
+        for (int i = 0; i < count; i++)
+        {
+                float vx = ((rand() % 100) / 50.0f) - 1.0f;
+                float vy = ((rand() % 100) / 50.0f) - 2.0f;
+
+                ui_spawn_particle((float)cx, (float)(cy * 2 + 1), vx * 2.0f, vy * 1.5f, c, 10.0f + (rand() % 15));
+        }
+}
+
+void ui_scale_region(int x, int y, int w, int h, float scale, Color clear_bg)
+{
+        if (scale >= 0.99f)
+                return;
+        if (scale <= 0.01f)
+                scale = 0.01f;
+        if (w * h > 2048)
+                return;
+
+        raw Cell temp[2048];
+        for (int r = 0; r < h; r++)
+        {
+                for (int c = 0; c < w; c++)
+                {
+                        int cx = x + c, cy = y + r;
+                        if (cx >= 0 && cx < term_width && cy >= 0 && cy < term_height)
+                                temp[r * w + c] = canvas[cy * term_width + cx];
+                        else
+                                temp[r * w + c] = (Cell){" ", clear_bg, clear_bg, false, false};
+                }
+        }
+
+        for (int r = 0; r < h; r++)
+        {
+                for (int c = 0; c < w; c++)
+                {
+                        int cx = x + c, cy = y + r;
+                        if (cx >= 0 && cx < term_width && cy >= 0 && cy < term_height)
+                                canvas[cy * term_width + cx] = (Cell){" ", clear_bg, clear_bg, false, false};
+                }
+        }
+
+        int nw = (int)(w * scale), nh = (int)(h * scale);
+        if (nw == 0)
+                nw = 1;
+        if (nh == 0)
+                nh = 1;
+
+        int nx = x + (w - nw) / 2, ny = y + (h - nh) / 2;
+
+        for (int r = 0; r < nh; r++)
+        {
+                for (int c = 0; c < nw; c++)
+                {
+                        int src_r = (int)(r / scale), src_c = (int)(c / scale);
+                        if (src_r >= h)
+                                src_r = h - 1;
+                        if (src_c >= w)
+                                src_c = w - 1;
+
+                        int cx = nx + c, cy = ny + r;
+                        if (cx >= 0 && cx < term_width && cy >= 0 && cy < term_height)
+                                canvas[cy * term_width + cx] = temp[src_r * w + src_c];
+                }
+        }
+}
 
 UIRect ui_list_item_rect(const UIListState *s, int index)
 {
@@ -115,6 +221,55 @@ UIRect ui_list_item_rect(const UIListState *s, int index)
             .y = s->p.y + (index / cols * c_h) - (int)(s->current_scroll + 0.5f),
             .w = c_w,
             .h = c_h};
+}
+
+void ui_action_push(UIActionFn undo, UIActionFn redo, UIActionFn free_fn, void *payload)
+{
+        if (global_history.head < global_history.count)
+        {
+                for (int i = global_history.head; i < global_history.count; i++)
+                        if (global_history.stack[i].free_fn)
+                                global_history.stack[i].free_fn(global_history.stack[i].payload);
+        }
+
+        if (global_history.head >= 512)
+        {
+                if (global_history.stack[0].free_fn)
+                        global_history.stack[0].free_fn(global_history.stack[0].payload);
+                memmove(global_history.stack, global_history.stack + 1, 511 * sizeof(UIAction));
+                global_history.head = 511;
+        }
+
+        global_history.stack[global_history.head++] = (UIAction){undo, redo, free_fn, payload};
+        global_history.count = global_history.head;
+}
+
+bool ui_action_undo(void)
+{
+        (global_history.head > 0) orelse return false;
+        global_history.head--;
+        UIAction *act = &global_history.stack[global_history.head];
+        if (act->undo_fn)
+                act->undo_fn(act->payload);
+        return true;
+}
+
+bool ui_action_redo(void)
+{
+        (global_history.head < global_history.count) orelse return false;
+        UIAction *act = &global_history.stack[global_history.head];
+        global_history.head++;
+        if (act->redo_fn)
+                act->redo_fn(act->payload);
+        return true;
+}
+
+void ui_action_clear(void)
+{
+        for (int i = 0; i < global_history.count; i++)
+                if (global_history.stack[i].free_fn)
+                        global_history.stack[i].free_fn(global_history.stack[i].payload);
+        global_history.head = global_history.count = 0;
 }
 
 static void on_resize(int s) { resize_flag = 1; }
@@ -479,6 +634,31 @@ void ui_text_centered(int x, int y, int w, const char *txt, Color fg, Color bg, 
 
 void ui_end(void)
 {
+        for (int i = 0; i < term_particle_count; i++)
+        {
+                UIParticle *p = &term_particles[i];
+                p->x += p->vx * term_dt_scale;
+                p->y += p->vy * term_dt_scale;
+                p->vy += 0.2f * term_dt_scale;
+                p->life -= term_dt_scale;
+
+                if (p->life <= 0.0f)
+                {
+                        term_particles[i] = term_particles[--term_particle_count];
+                        i--;
+                        continue;
+                }
+
+                int px = (int)p->x;
+                int py = (int)p->y;
+                if (px >= 0 && px < term_width && py >= 0 && py < term_height * 2)
+                {
+                        Cell *c = &canvas[(py / 2) * term_width + px];
+                        c->fg = p->color;
+                        strcpy(c->ch, (py % 2 == 0) ? "\xe2\x96\x80" : "\xe2\x96\x84");
+                }
+        }
+
         if (!term_mouse.hide_cursor && term_mouse.x >= 0 && term_mouse.x < term_width && term_mouse.y >= 0 && term_mouse.y < term_height)
         {
                 int idx = term_mouse.y * term_width + term_mouse.x;
@@ -957,16 +1137,12 @@ bool ui_list_is_animating(UIListState *s)
 
 void ui_list_tick_animations(UIListState *s, int sel_x, int sel_y)
 {
-        float carry_spd = 0.4f;
-        float fly_spd = 0.15f;
-        float drop_spd = 0.10f;
-
         if (s->carrying)
         {
                 float tx = sel_x + (s->mode == UI_MODE_LIST ? 45 : s->p.cell_w / 2);
                 float ty = sel_y + (s->mode == UI_MODE_LIST ? -1 : s->p.cell_h / 2);
-                s->carry_x += (tx - s->carry_x) * carry_spd;
-                s->carry_y += (ty - s->carry_y) * carry_spd;
+                s->carry_x += (tx - s->carry_x) * ANIM_SPEED_CARRY;
+                s->carry_y += (ty - s->carry_y) * ANIM_SPEED_CARRY;
         }
         else if (s->is_dragging)
         {
@@ -980,11 +1156,11 @@ void ui_list_tick_animations(UIListState *s, int sel_x, int sel_y)
         }
 
         if (s->fly_anim > 0.0f)
-                s->fly_anim = (s->fly_anim - fly_spd * term_dt_scale < 0.0f) ? 0.0f : s->fly_anim - fly_spd * term_dt_scale;
+                s->fly_anim = (s->fly_anim - ANIM_SPEED_FLY * term_dt_scale < 0.0f) ? 0.0f : s->fly_anim - ANIM_SPEED_FLY * term_dt_scale;
         if (s->pickup_anim > 0.0f)
-                s->pickup_anim = (s->pickup_anim - fly_spd * term_dt_scale < 0.0f) ? 0.0f : s->pickup_anim - fly_spd * term_dt_scale;
+                s->pickup_anim = (s->pickup_anim - ANIM_SPEED_FLY * term_dt_scale < 0.0f) ? 0.0f : s->pickup_anim - ANIM_SPEED_FLY * term_dt_scale;
         if (s->drop_anim > 0.0f)
-                s->drop_anim = (s->drop_anim - drop_spd * term_dt_scale < 0.0f) ? 0.0f : s->drop_anim - drop_spd * term_dt_scale;
+                s->drop_anim = (s->drop_anim - ANIM_SPEED_DROP * term_dt_scale < 0.0f) ? 0.0f : s->drop_anim - ANIM_SPEED_DROP * term_dt_scale;
 }
 
 bool ui_list_get_anim_coords(UIListState *s, int base_x, int base_y, bool is_dropped, bool is_picked_up, int *out_x, int *out_y)

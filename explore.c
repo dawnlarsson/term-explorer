@@ -4,11 +4,22 @@
 #include <limits.h>
 #include <ctype.h>
 
-float anim_speed_carry = 0.4f;
-float anim_speed_drop = 0.10f;
-float anim_speed_fly = 0.15f;
-
 Color clr_bg, clr_bar = {170, 170, 170}, clr_text = {255, 255, 255}, clr_folder = {255, 255, 85}, clr_hover = {170, 170, 170}, clr_sel_bg = {40, 70, 120};
+
+typedef struct AppState AppState;
+
+typedef struct
+{
+        char old_path[PATH_MAX];
+        char new_path[PATH_MAX];
+} FileMove;
+
+typedef struct
+{
+        FileMove *moves;
+        int count;
+        AppState *app;
+} MoveAction;
 
 typedef struct
 {
@@ -23,7 +34,7 @@ typedef struct
         char path[PATH_MAX];
 } CarriedFile;
 
-typedef struct
+struct AppState
 {
         FileEntry *entries;
         int capacity, count;
@@ -39,7 +50,51 @@ typedef struct
 
         int last_hovered_idx;
         FileEntry fly_entry;
-} AppState;
+
+        char pop_names[64][256];
+        int pop_count;
+        float pop_anim;
+        bool pop_is_out;
+};
+
+void cb_undo_move(void *data)
+{
+        MoveAction *act = (MoveAction *)data;
+        act->app->pop_count = 0;
+        act->app->pop_anim = 1.0f;
+        act->app->pop_is_out = false;
+
+        for (int i = 0; i < act->count; i++)
+        {
+                rename(act->moves[i].new_path, act->moves[i].old_path);
+                char *base = strrchr(act->moves[i].old_path, '/');
+                if (base && act->app->pop_count < 64)
+                        strcpy(act->app->pop_names[act->app->pop_count++], base + 1);
+        }
+}
+
+void cb_redo_move(void *data)
+{
+        MoveAction *act = (MoveAction *)data;
+        act->app->pop_count = 0;
+        act->app->pop_anim = 1.0f;
+        act->app->pop_is_out = true;
+
+        for (int i = 0; i < act->count; i++)
+        {
+                rename(act->moves[i].old_path, act->moves[i].new_path);
+                char *base = strrchr(act->moves[i].new_path, '/');
+                if (base && act->app->pop_count < 64)
+                        strcpy(act->app->pop_names[act->app->pop_count++], base + 1);
+        }
+}
+
+void cb_free_move(void *data)
+{
+        MoveAction *act = (MoveAction *)data;
+        free(act->moves);
+        free(act);
+}
 
 int cmp_entries(const void *a, const void *b)
 {
@@ -53,12 +108,26 @@ int cmp_entries(const void *a, const void *b)
         return strcmp(ea->name, eb->name);
 }
 
-void draw_item_grid(AppState *app, FileEntry *e, int x, int y, int w, int h, bool is_sel, bool is_hover, bool is_ghost, bool is_drop_target, bool is_multi_sel, bool is_dropped)
+void draw_item_grid(AppState *app, FileEntry *e, int x, int y, int w, int h, bool is_sel, bool is_hover, bool is_ghost, bool is_drop_target, bool is_multi_sel, bool is_dropped, bool is_popping)
 {
+        int float_y = 0;
+        if (is_popping)
+                float_y = app->pop_is_out ? (int)((1.0f - app->pop_anim) * 2.0f) : -(int)(app->pop_anim * 2.0f);
+        y += float_y;
+
         Color item_bg = is_drop_target ? (Color){50, 150, 50} : (is_ghost ? (Color){30, 30, 30} : (is_multi_sel ? clr_sel_bg : (is_hover || is_sel ? clr_hover : clr_bg)));
+
+        if (is_popping)
+        {
+                int flash = (int)(app->pop_anim * 80.0f);
+                item_bg.r = item_bg.r + flash > 255 ? 255 : item_bg.r + flash;
+                item_bg.g = item_bg.g + flash > 255 ? 255 : item_bg.g + flash;
+                item_bg.b = item_bg.b + flash > 255 ? 255 : item_bg.b + flash;
+        }
+
         Color icon_fg = is_ghost ? (Color){100, 100, 100} : (e->is_dir ? clr_folder : (e->is_exec ? (Color){85, 255, 85} : clr_text));
 
-        if (is_hover || is_sel || is_ghost || is_drop_target || is_multi_sel)
+        if (is_hover || is_sel || is_ghost || is_drop_target || is_multi_sel || is_popping)
                 ui_rect(x + 1, y, w - 2, h, item_bg);
 
         char ext[5] = ".   ";
@@ -103,14 +172,35 @@ void draw_item_grid(AppState *app, FileEntry *e, int x, int y, int w, int h, boo
         ui_text_centered(x + 1, y + 4 + y_off, mw, l1, is_ghost ? icon_fg : clr_text, item_bg, is_dropped, false);
         if (l2[0])
                 ui_text_centered(x + 1, y + 5 + y_off, mw, l2, is_ghost ? icon_fg : clr_text, item_bg, is_dropped, false);
+
+        if (is_popping)
+        {
+                float scale = app->pop_is_out ? app->pop_anim : (1.0f - app->pop_anim);
+                ui_scale_region(x, y, w, h, scale, clr_bg);
+        }
 }
 
-void draw_item_list(AppState *app, FileEntry *e, int x, int y, int w, int h, bool is_sel, bool is_hover, bool is_ghost, bool is_drop_target, bool is_multi_sel, bool is_dropped)
+void draw_item_list(AppState *app, FileEntry *e, int x, int y, int w, int h, bool is_sel, bool is_hover, bool is_ghost, bool is_drop_target, bool is_multi_sel, bool is_dropped, bool is_popping)
 {
+        int float_y = 0;
+        if (is_popping)
+                float_y = app->pop_is_out ? (int)((1.0f - app->pop_anim) * 1.0f) : -(int)(app->pop_anim * 1.0f);
+        y += float_y;
+
         Color item_bg = is_drop_target ? (Color){50, 150, 50} : (is_ghost ? (Color){30, 30, 30} : (is_multi_sel ? clr_sel_bg : (is_hover || is_sel ? clr_hover : clr_bg)));
+
+        if (is_popping)
+        {
+                int flash = (int)(app->pop_anim * 80.0f);
+                item_bg.r = item_bg.r + flash > 255 ? 255 : item_bg.r + flash;
+                item_bg.g = item_bg.g + flash > 255 ? 255 : item_bg.g + flash;
+                item_bg.b = item_bg.b + flash > 255 ? 255 : item_bg.b + flash;
+        }
+
         Color icon_fg = is_ghost ? (Color){100, 100, 100} : (e->is_dir ? clr_folder : (e->is_exec ? (Color){85, 255, 85} : clr_text));
 
         ui_rect(x, y, w, 1, item_bg);
+
         ui_text(x + 1, y, e->is_dir ? " ▓]" : " ■", icon_fg, item_bg, false, false);
 
         raw char l[256];
@@ -134,14 +224,20 @@ void draw_item_list(AppState *app, FileEntry *e, int x, int y, int w, int h, boo
                         snprintf(size_str, 32, "%4lld GB", (long long)(s >> 30));
                 ui_text(x + w - 10, y, size_str, is_ghost ? icon_fg : clr_bar, item_bg, false, false);
         }
+
+        if (is_popping)
+        {
+                float scale = app->pop_is_out ? app->pop_anim : (1.0f - app->pop_anim);
+                ui_scale_region(x, y, w, h, scale, clr_bg);
+        }
 }
 
-void draw_item(AppState *app, FileEntry *e, UIItemResult *res, bool is_sel, bool is_ghost, bool is_dropped)
+void draw_item(AppState *app, FileEntry *e, UIItemResult *res, bool is_sel, bool is_ghost, bool is_dropped, bool is_popping)
 {
         if (app->list.mode == UI_MODE_GRID)
-                draw_item_grid(app, e, res->x, res->y, res->w, res->h, is_sel, res->hovered, is_ghost, res->is_drop_target, res->is_selected, is_dropped);
+                draw_item_grid(app, e, res->x, res->y, res->w, res->h, is_sel, res->hovered, is_ghost, res->is_drop_target, res->is_selected, is_dropped, is_popping);
         else
-                draw_item_list(app, e, res->x, res->y, res->w, res->h, is_sel, res->hovered, is_ghost, res->is_drop_target, res->is_selected, is_dropped);
+                draw_item_list(app, e, res->x, res->y, res->w, res->h, is_sel, res->hovered, is_ghost, res->is_drop_target, res->is_selected, is_dropped, is_popping);
 }
 
 bool is_item_dropped(AppState *app, const char *name)
@@ -166,6 +262,8 @@ bool is_item_carried(AppState *app, const char *name)
 
 void app_load_dir(AppState *app, const char *path)
 {
+        bool dir_changed = (strcmp(path, ".") != 0);
+
         DIR *d = opendir(path) orelse
         {
                 d = opendir(".");
@@ -207,7 +305,11 @@ void app_load_dir(AppState *app, const char *path)
         }
         qsort(app->entries, app->count, sizeof(FileEntry), cmp_entries);
 
-        if (app->count > 0 && sel[0])
+        if (dir_changed && app->count > 0)
+        {
+                app->list.selected_idx = 0;
+        }
+        else if (app->count > 0 && sel[0])
         {
                 for (int i = 0; i < app->count; i++)
                 {
@@ -223,6 +325,19 @@ void app_load_dir(AppState *app, const char *path)
 void handle_input(AppState *app, int *key, const UIListParams *params)
 {
         UIListState *s = &app->list;
+
+        if (*key == 'u' || *key == 26)
+        {
+                if (ui_action_undo())
+                        strcpy(app->next_dir, ".");
+                *key = 0;
+        }
+        if (*key == 'r' || *key == 'R' || *key == 25)
+        {
+                if (ui_action_redo())
+                        strcpy(app->next_dir, ".");
+                *key = 0;
+        }
 
         if (*key == 'q' && !s->carrying)
                 app->quit = true;
@@ -286,14 +401,32 @@ void handle_input(AppState *app, int *key, const UIListParams *params)
                         app->drop_count = 0;
                         s->drop_anim = 1.0f;
                         s->drop_to_target = false;
+
+                        MoveAction *act = malloc(sizeof(MoveAction));
+                        act->moves = malloc(sizeof(FileMove) * app->carried_count);
+                        act->count = 0;
+                        act->app = app;
+
                         for (int i = 0; i < app->carried_count; i++)
                         {
                                 raw char new_path[PATH_MAX];
                                 snprintf(new_path, PATH_MAX, "%s/%s", app->cwd, app->carried[i].entry.name);
-                                rename(app->carried[i].path, new_path);
+
+                                (rename(app->carried[i].path, new_path) == 0) orelse continue;
+
+                                strcpy(act->moves[act->count].old_path, app->carried[i].path);
+                                strcpy(act->moves[act->count].new_path, new_path);
+                                act->count++;
+
                                 if (app->drop_count < 64)
                                         strcpy(app->drop_names[app->drop_count++], app->carried[i].entry.name);
                         }
+
+                        if (act->count > 0)
+                                ui_action_push(cb_undo_move, cb_redo_move, cb_free_move, act);
+                        else
+                                cb_free_move(act);
+
                         s->carrying = false;
                         strcpy(app->next_dir, ".");
                 }
@@ -321,6 +454,9 @@ void handle_input(AppState *app, int *key, const UIListParams *params)
                         {
                                 s->carrying = true;
                                 s->pickup_anim = 1.0f;
+
+                                UIRect br = ui_list_item_rect(s, src);
+                                ui_burst_particles(br.x + br.w / 2, br.y + br.h / 2, 15, clr_text);
                         }
                 }
                 *key = 0;
@@ -375,12 +511,33 @@ void app_process_drops(AppState *app)
         s->drop_dst_y = r.y;
         s->drop_to_target = true;
 
+        MoveAction *act = malloc(sizeof(MoveAction));
+        act->moves = malloc(sizeof(FileMove) * temp_carried_count);
+        act->count = 0;
+        act->app = app;
+
         for (int i = 0; i < temp_carried_count; i++)
         {
                 raw char new_path[PATH_MAX];
                 snprintf(new_path, PATH_MAX, "%s/%s/%s", app->cwd, app->entries[dst].name, temp_carried[i].entry.name);
-                rename(temp_carried[i].path, new_path);
+
+                (rename(temp_carried[i].path, new_path) == 0) orelse continue;
+
+                strcpy(act->moves[act->count].old_path, temp_carried[i].path);
+                strcpy(act->moves[act->count].new_path, new_path);
+                act->count++;
         }
+
+        if (act->count > 0)
+        {
+                ui_burst_particles(r.x + r.w / 2, r.y + r.h / 2, 20 * act->count, clr_folder);
+                ui_action_push(cb_undo_move, cb_redo_move, cb_free_move, act);
+        }
+        else
+        {
+                cb_free_move(act);
+        }
+
         strcpy(app->next_dir, ".");
 }
 
@@ -419,7 +576,6 @@ void app_render_ui(AppState *app, UIListParams *params, int key)
                                 item.is_ghost = false;
                         }
 
-                        // RESTORED: Checking if this specific item holds the keyboard focus
                         bool is_sel = (i == s->selected_idx);
 
                         int current_drag = s->is_dragging ? s->drag_idx : s->kb_drag_idx;
@@ -428,8 +584,16 @@ void app_render_ui(AppState *app, UIListParams *params, int key)
                         bool is_picked_up_mouse = (!s->carrying && current_drag != -1 && (s->selections[current_drag] ? item.is_selected : current_drag == i));
                         bool is_ghost = item.is_ghost || is_picked_up_mouse || is_carried;
 
+                        bool is_popping = false;
+                        if (app->pop_anim > 0.01f)
+                        {
+                                for (int p = 0; p < app->pop_count; p++)
+                                        if (!strcmp(app->entries[i].name, app->pop_names[p]))
+                                                is_popping = true;
+                        }
+
                         if (pass == 0 && !is_dropped)
-                                draw_item(app, &app->entries[i], &item, is_sel, is_ghost, false);
+                                draw_item(app, &app->entries[i], &item, is_sel, is_ghost, false, is_popping);
 
                         int anim_x, anim_y;
                         if (pass == 1 && ui_list_get_anim_coords(s, item.x, item.y, is_dropped, is_carried || is_picked_up_mouse, &anim_x, &anim_y))
@@ -437,7 +601,7 @@ void app_render_ui(AppState *app, UIListParams *params, int key)
                                 UIItemResult anim_res = item;
                                 anim_res.x = anim_x;
                                 anim_res.y = anim_y;
-                                draw_item(app, &app->entries[i], &anim_res, is_sel, false, is_dropped);
+                                draw_item(app, &app->entries[i], &anim_res, is_sel, false, is_dropped, is_popping);
                         }
 
                         if (pass == 0 && item.right_clicked)
@@ -454,7 +618,7 @@ void app_render_ui(AppState *app, UIListParams *params, int key)
         ui_text(1, 0, header, (Color){0}, clr_bar, false, false);
 
         ui_rect(0, term_height - 1, term_width, 1, clr_bar);
-        ui_text(1, term_height - 1, s->carrying ? " Arrows: Navigate | Enter: Drop | 'Tab': Drop Here | Esc: Cancel " : " Arrows: Navigate | Space: Select | Tab: Move | Esc: Cancel | 'q': Quit ", (Color){0}, clr_bar, false, false);
+        ui_text(1, term_height - 1, s->carrying ? " Arrows: Navigate | Enter: Drop | 'Tab': Drop Here | Esc: Cancel " : " Arrows: Navigate | Space: Select | Tab: Move | u: Undo | r: Redo | Esc: Cancel ", (Color){0}, clr_bar, false, false);
 
         const char *menu_options[] = {"Open", "Rename", "Delete", "Cancel"};
         int selected_action = -1;
@@ -466,7 +630,7 @@ void app_render_ui(AppState *app, UIListParams *params, int key)
         if (ui_list_get_fly_coords(s, &fly_x, &fly_y))
         {
                 UIItemResult f_res = {.x = fly_x, .y = fly_y, .w = ui_list_item_rect(s, 0).w, .h = ui_list_item_rect(s, 0).h};
-                draw_item(app, &app->fly_entry, &f_res, false, false, false);
+                draw_item(app, &app->fly_entry, &f_res, false, false, false, false);
         }
 
         int current_drag = s->is_dragging ? s->drag_idx : s->kb_drag_idx;
@@ -480,7 +644,7 @@ void app_render_ui(AppState *app, UIListParams *params, int key)
 
                 FileEntry *ghost_entry = s->carrying ? &app->carried[0].entry : &app->entries[current_drag];
                 UIItemResult c_res = {.x = (int)s->carry_x, .y = (int)s->carry_y, .w = 14, .h = 7};
-                draw_item(app, ghost_entry, &c_res, false, true, false);
+                draw_item(app, ghost_entry, &c_res, false, true, false, false);
                 ui_draw_badge((int)s->carry_x + 10, (int)s->carry_y - 1, drag_count == 0 && !s->carrying ? 1 : drag_count);
         }
 }
@@ -489,8 +653,9 @@ int main(void)
 {
         term_init() orelse return 1;
         defer term_restore();
+        defer ui_action_clear();
 
-        AppState app; // Prism implicitly zero-initializes this!
+        AppState app;
         app.last_hovered_idx = -1;
         defer free(app.entries);
         app_load_dir(&app, ".");
@@ -500,19 +665,26 @@ int main(void)
         while (!app.quit)
         {
                 UIListState *s = &app.list;
-                int timeout = (app.next_dir[0] || ui_list_is_animating(s)) ? term_anim_timeout : 1000;
+                int timeout = (app.next_dir[0] || ui_list_is_animating(s) || app.pop_anim > 0.0f) ? term_anim_timeout : 1000;
 
                 int key = term_poll(first_frame ? 0 : timeout);
                 UIListParams params = {0, 1, term_width, term_height - 2 > 0 ? term_height - 2 : 1, app.count, 14, 7, clr_bg, {30, 30, 30}, clr_bar};
 
                 handle_input(&app, &key, &params);
 
-                if (app.next_dir[0] && (s->drop_anim <= 0.01f || !s->drop_to_target))
+                if (app.next_dir[0] && (s->drop_anim <= 0.01f || !s->drop_to_target) && (!app.pop_is_out || app.pop_anim <= 0.01f))
                 {
                         app_load_dir(&app, app.next_dir);
                         app.next_dir[0] = '\0';
                         first_frame = true;
                         continue;
+                }
+
+                if (app.pop_anim > 0.0f)
+                {
+                        app.pop_anim -= ANIM_SPEED_POP * term_dt_scale;
+                        if (app.pop_anim < 0.0f)
+                                app.pop_anim = 0.0f;
                 }
 
                 ui_begin();
