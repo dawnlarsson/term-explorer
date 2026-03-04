@@ -30,6 +30,10 @@
 #define KEY_ESC 27
 #define KEY_BACKSPACE 127
 
+#define KEY_SHIFT_PAGE_DOWN 1009
+#define KEY_DELETE 1010
+#define KEY_ENTER 10
+
 #define ANIM_SPEED_CARRY 0.4f
 #define ANIM_SPEED_DROP 0.10f
 #define ANIM_SPEED_FLY 0.15f
@@ -156,7 +160,7 @@ void ui_burst_particles(int cx, int cy, int count, Color c)
 
 void ui_scale_region(int x, int y, int w, int h, float scale, Color clear_bg)
 {
-        if (scale >= 0.99f)
+        if (scale >= 0.99f && scale <= 1.01f)
                 return;
         if (scale <= 0.01f)
                 scale = 0.01f;
@@ -517,6 +521,7 @@ int term_poll(int timeout_ms)
                                         key = (c == '5') ? KEY_PAGE_UP : (c == '6')           ? KEY_PAGE_DOWN
                                                                      : (c == '4' || c == '8') ? KEY_END
                                                                      : (c == '1' || c == '7') ? KEY_HOME
+                                                                     : (c == '3')             ? KEY_DELETE
                                                                                               : 0;
                                         if (key)
                                         {

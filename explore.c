@@ -34,6 +34,19 @@ typedef struct
         char path[PATH_MAX];
 } CarriedFile;
 
+typedef struct
+{
+        char src_path[PATH_MAX];
+        char dst_path[PATH_MAX];
+} CopyMove;
+
+typedef struct
+{
+        CopyMove *moves;
+        int count;
+        AppState *app;
+} CopyAction;
+
 struct AppState
 {
         FileEntry *entries;
@@ -55,7 +68,102 @@ struct AppState
         int pop_count, pop_cap;
         float pop_anim;
         bool pop_is_out;
+
+        char (*clipboard)[PATH_MAX];
+        int clipboard_count, clipboard_cap;
+
+        char trash_dir[PATH_MAX];
+        int trash_counter;
 };
+
+void rm_rf(const char *path)
+{
+        struct stat st;
+        if (stat(path, &st) != 0)
+                return;
+        if (S_ISDIR(st.st_mode))
+        {
+                DIR *d = opendir(path);
+                if (d)
+                {
+                        struct dirent *dir;
+                        while ((dir = readdir(d)) != NULL)
+                        {
+                                if (!strcmp(dir->d_name, ".") || !strcmp(dir->d_name, ".."))
+                                        continue;
+                                char sub[PATH_MAX];
+                                snprintf(sub, PATH_MAX, "%s/%s", path, dir->d_name);
+                                rm_rf(sub);
+                        }
+                        closedir(d);
+                }
+                rmdir(path);
+        }
+        else
+        {
+                unlink(path);
+        }
+}
+
+bool copy_path(const char *src, const char *dst)
+{
+        struct stat st;
+        if (stat(src, &st) != 0)
+                return false;
+
+        if (S_ISDIR(st.st_mode))
+        {
+                mkdir(dst, 0777);
+                DIR *d = opendir(src);
+                if (!d)
+                        return false;
+                struct dirent *dir;
+                while ((dir = readdir(d)) != NULL)
+                {
+                        if (strcmp(dir->d_name, ".") == 0 || strcmp(dir->d_name, "..") == 0)
+                                continue;
+                        char sub_src[PATH_MAX], sub_dst[PATH_MAX];
+                        snprintf(sub_src, PATH_MAX, "%s/%s", src, dir->d_name);
+                        snprintf(sub_dst, PATH_MAX, "%s/%s", dst, dir->d_name);
+                        copy_path(sub_src, sub_dst);
+                }
+                closedir(d);
+                chmod(dst, st.st_mode);
+                return true;
+        }
+        else
+        {
+                FILE *fs = fopen(src, "rb");
+                if (!fs)
+                        return false;
+                FILE *fd = fopen(dst, "wb");
+                if (!fd)
+                {
+                        fclose(fs);
+                        return false;
+                }
+                char buf[8192];
+                size_t n;
+                while ((n = fread(buf, 1, sizeof(buf), fs)) > 0)
+                        fwrite(buf, 1, n, fd);
+                fclose(fs);
+                fclose(fd);
+                chmod(dst, st.st_mode);
+                return true;
+        }
+}
+
+bool move_path(const char *src, const char *dst)
+{
+        if (rename(src, dst) == 0)
+                return true;
+        if (copy_path(src, dst))
+        {
+                rm_rf(src);
+                return true;
+        }
+        return false;
+}
 
 void cb_undo_move(void *data)
 {
@@ -77,7 +185,7 @@ void cb_undo_move(void *data)
 
         for (int i = 0; i < act->count; i++)
         {
-                rename(act->moves[i].new_path, act->moves[i].old_path);
+                move_path(act->moves[i].new_path, act->moves[i].old_path);
 
                 if (act->app->pop_count + 2 > act->app->pop_cap)
                 {
@@ -109,7 +217,7 @@ void cb_redo_move(void *data)
 
         for (int i = 0; i < act->count; i++)
         {
-                rename(act->moves[i].old_path, act->moves[i].new_path);
+                move_path(act->moves[i].old_path, act->moves[i].new_path);
 
                 if (act->app->pop_count + 2 > act->app->pop_cap)
                 {
@@ -128,6 +236,140 @@ void cb_free_move(void *data)
         free(act);
 }
 
+void cb_undo_copy(void *data)
+{
+        CopyAction *act = (CopyAction *)data;
+        act->app->pop_count = 0;
+        act->app->pop_anim = 1.0f;
+
+        char dir_new[PATH_MAX];
+        strcpy(dir_new, act->moves[0].dst_path);
+        char *slash_new = strrchr(dir_new, '/');
+        if (slash_new)
+                *slash_new = '\0';
+        act->app->pop_is_out = !strcmp(act->app->cwd, dir_new);
+
+        for (int i = 0; i < act->count; i++)
+        {
+                rm_rf(act->moves[i].dst_path);
+                if (act->app->pop_count + 1 > act->app->pop_cap)
+                {
+                        act->app->pop_cap = act->app->pop_cap ? act->app->pop_cap * 2 : 64;
+                        act->app->pop_paths = realloc(act->app->pop_paths, act->app->pop_cap * PATH_MAX) orelse return;
+                }
+                strcpy(act->app->pop_paths[act->app->pop_count++], act->moves[i].dst_path);
+        }
+}
+
+void cb_redo_copy(void *data)
+{
+        CopyAction *act = (CopyAction *)data;
+        act->app->pop_count = 0;
+        act->app->pop_anim = 1.0f;
+
+        char dir_new[PATH_MAX];
+        strcpy(dir_new, act->moves[0].dst_path);
+        char *slash_new = strrchr(dir_new, '/');
+        if (slash_new)
+                *slash_new = '\0';
+        act->app->pop_is_out = !strcmp(act->app->cwd, dir_new);
+
+        for (int i = 0; i < act->count; i++)
+        {
+                copy_path(act->moves[i].src_path, act->moves[i].dst_path);
+                if (act->app->pop_count + 1 > act->app->pop_cap)
+                {
+                        act->app->pop_cap = act->app->pop_cap ? act->app->pop_cap * 2 : 64;
+                        act->app->pop_paths = realloc(act->app->pop_paths, act->app->pop_cap * PATH_MAX) orelse return;
+                }
+                strcpy(act->app->pop_paths[act->app->pop_count++], act->moves[i].dst_path);
+        }
+}
+
+void cb_free_copy(void *data)
+{
+        CopyAction *act = (CopyAction *)data;
+        free(act->moves);
+        free(act);
+}
+
+void app_do_delete(AppState *app, int target_idx)
+{
+        UIListState *s = &app->list;
+        bool drag_multi = false;
+
+        if (target_idx != -1 && s->selections[target_idx])
+        {
+                for (int i = 0; i < app->count; i++)
+                        if (s->selections[i])
+                                drag_multi = true;
+        }
+        else if (target_idx == -1)
+        {
+                for (int i = 0; i < app->count; i++)
+                        if (s->selections[i])
+                                drag_multi = true;
+                if (!drag_multi && s->selected_idx != -1)
+                {
+                        target_idx = s->selected_idx;
+                }
+        }
+
+        int count = 0;
+        for (int i = 0; i < app->count; i++)
+        {
+                if ((drag_multi && s->selections[i]) || (!drag_multi && i == target_idx))
+                {
+                        if (strcmp(app->entries[i].name, "..") != 0)
+                                count++;
+                }
+        }
+
+        if (count == 0)
+                return;
+
+        MoveAction *act = malloc(sizeof(MoveAction)) orelse return;
+        act->moves = malloc(sizeof(FileMove) * count) orelse
+        {
+                free(act);
+                return;
+        };
+        act->count = 0;
+        act->app = app;
+
+        for (int i = 0; i < app->count; i++)
+        {
+                if ((drag_multi && s->selections[i]) || (!drag_multi && i == target_idx))
+                {
+                        if (strcmp(app->entries[i].name, "..") != 0)
+                        {
+                                char src_path[PATH_MAX];
+                                snprintf(src_path, PATH_MAX, "%s/%s", app->cwd, app->entries[i].name);
+
+                                char dst_path[PATH_MAX];
+                                snprintf(dst_path, PATH_MAX, "%s/trash_%d_%s", app->trash_dir, app->trash_counter++, app->entries[i].name);
+
+                                if (move_path(src_path, dst_path))
+                                {
+                                        strcpy(act->moves[act->count].old_path, src_path);
+                                        strcpy(act->moves[act->count].new_path, dst_path);
+                                        act->count++;
+                                }
+                        }
+                }
+        }
+
+        if (act->count > 0)
+        {
+                ui_action_push(cb_undo_move, cb_redo_move, cb_free_move, act);
+                strcpy(app->next_dir, ".");
+        }
+        else
+        {
+                cb_free_move(act);
+        }
+}
+
 int cmp_entries(const void *a, const void *b)
 {
         FileEntry *ea = (FileEntry *)a, *eb = (FileEntry *)b;
@@ -140,7 +382,7 @@ int cmp_entries(const void *a, const void *b)
         return strcmp(ea->name, eb->name);
 }
 
-void draw_item_grid(AppState *app, FileEntry *e, int x, int y, int w, int h, bool is_sel, bool is_hover, bool is_ghost, bool is_drop_target, bool is_multi_sel, bool is_dropped, bool is_popping)
+void draw_item_grid(AppState *app, FileEntry *e, int x, int y, int w, int h, bool is_sel, bool is_hover, bool is_ghost, bool is_drop_target, bool is_multi_sel, bool is_dropped, bool is_popping, bool is_pressed, bool is_ctx_target)
 {
         int float_y = 0;
         if (is_popping)
@@ -205,14 +447,19 @@ void draw_item_grid(AppState *app, FileEntry *e, int x, int y, int w, int h, boo
         if (l2[0])
                 ui_text_centered(x + 1, y + 5 + y_off, mw, l2, is_ghost ? icon_fg : clr_text, item_bg, is_dropped, false);
 
+        float scale = 1.0f;
         if (is_popping)
-        {
-                float scale = app->pop_is_out ? app->pop_anim : (1.0f - app->pop_anim);
+                scale = app->pop_is_out ? app->pop_anim : (1.0f - app->pop_anim);
+        else if (is_pressed)
+                scale = 0.85f;
+        else if (is_ctx_target)
+                scale = 1.15f;
+
+        if (scale < 0.99f || scale > 1.01f)
                 ui_scale_region(x, y, w, h, scale, clr_bg);
-        }
 }
 
-void draw_item_list(AppState *app, FileEntry *e, int x, int y, int w, int h, bool is_sel, bool is_hover, bool is_ghost, bool is_drop_target, bool is_multi_sel, bool is_dropped, bool is_popping)
+void draw_item_list(AppState *app, FileEntry *e, int x, int y, int w, int h, bool is_sel, bool is_hover, bool is_ghost, bool is_drop_target, bool is_multi_sel, bool is_dropped, bool is_popping, bool is_pressed, bool is_ctx_target)
 {
         int float_y = 0;
         if (is_popping)
@@ -257,19 +504,24 @@ void draw_item_list(AppState *app, FileEntry *e, int x, int y, int w, int h, boo
                 ui_text(x + w - 10, y, size_str, is_ghost ? icon_fg : clr_bar, item_bg, false, false);
         }
 
+        float scale = 1.0f;
         if (is_popping)
-        {
-                float scale = app->pop_is_out ? app->pop_anim : (1.0f - app->pop_anim);
+                scale = app->pop_is_out ? app->pop_anim : (1.0f - app->pop_anim);
+        else if (is_pressed)
+                scale = 0.95f;
+        else if (is_ctx_target)
+                scale = 1.05f;
+
+        if (scale < 0.99f || scale > 1.01f)
                 ui_scale_region(x, y, w, h, scale, clr_bg);
-        }
 }
 
-void draw_item(AppState *app, FileEntry *e, UIItemResult *res, bool is_sel, bool is_ghost, bool is_dropped, bool is_popping)
+void draw_item(AppState *app, FileEntry *e, UIItemResult *res, bool is_sel, bool is_ghost, bool is_dropped, bool is_popping, bool is_pressed, bool is_ctx_target)
 {
         if (app->list.mode == UI_MODE_GRID)
-                draw_item_grid(app, e, res->x, res->y, res->w, res->h, is_sel, res->hovered, is_ghost, res->is_drop_target, res->is_selected, is_dropped, is_popping);
+                draw_item_grid(app, e, res->x, res->y, res->w, res->h, is_sel, res->hovered, is_ghost, res->is_drop_target, res->is_selected, is_dropped, is_popping, is_pressed, is_ctx_target);
         else
-                draw_item_list(app, e, res->x, res->y, res->w, res->h, is_sel, res->hovered, is_ghost, res->is_drop_target, res->is_selected, is_dropped, is_popping);
+                draw_item_list(app, e, res->x, res->y, res->w, res->h, is_sel, res->hovered, is_ghost, res->is_drop_target, res->is_selected, is_dropped, is_popping, is_pressed, is_ctx_target);
 }
 
 bool is_item_dropped(AppState *app, const char *path)
@@ -424,6 +676,98 @@ void handle_input(AppState *app, int *key, const UIListParams *params)
         if (*key == KEY_BACKSPACE)
                 strcpy(app->next_dir, "..");
 
+        if (*key == KEY_DELETE)
+        {
+                app_do_delete(app, -1);
+                *key = 0;
+        }
+
+        if (*key == 'c')
+        {
+                app->clipboard_count = 0;
+                bool drag_multi = false;
+                for (int i = 0; i < app->count; i++)
+                        if (s->selections[i])
+                                drag_multi = true;
+
+                int src = s->selected_idx != -1 ? s->selected_idx : (app->last_hovered_idx == -1 ? 0 : app->last_hovered_idx);
+                for (int i = 0; i < app->count; i++)
+                {
+                        if ((drag_multi && s->selections[i]) || (!drag_multi && i == src))
+                        {
+                                if (strcmp(app->entries[i].name, "..") != 0)
+                                {
+                                        if (app->clipboard_count >= app->clipboard_cap)
+                                        {
+                                                app->clipboard_cap = app->clipboard_cap ? app->clipboard_cap * 2 : 256;
+                                                app->clipboard = realloc(app->clipboard, app->clipboard_cap * PATH_MAX) orelse break;
+                                        }
+                                        snprintf(app->clipboard[app->clipboard_count++], PATH_MAX, "%s/%s", app->cwd, app->entries[i].name);
+                                }
+                        }
+                }
+                ui_list_clear_selections(s);
+                *key = 0;
+        }
+
+        if (*key == 'p' && app->clipboard_count > 0)
+        {
+                CopyAction *act = malloc(sizeof(CopyAction)) orelse return;
+                act->moves = malloc(sizeof(CopyMove) * app->clipboard_count) orelse
+                {
+                        free(act);
+                        return;
+                };
+                act->count = 0;
+                act->app = app;
+
+                for (int i = 0; i < app->clipboard_count; i++)
+                {
+                        char *src_path = app->clipboard[i];
+                        char *base = strrchr(src_path, '/');
+                        base = base ? base + 1 : src_path;
+
+                        char base_name[256];
+                        strncpy(base_name, base, 255);
+                        base_name[255] = '\0';
+
+                        char new_name[512];
+                        char *dot = strrchr(base_name, '.');
+
+                        if (dot && dot != base_name)
+                        {
+                                char ext[256];
+                                strcpy(ext, dot);
+                                *dot = '\0';
+                                snprintf(new_name, 512, "%s.copy%s", base_name, ext);
+                        }
+                        else
+                        {
+                                snprintf(new_name, 512, "%s.copy", base_name);
+                        }
+
+                        char dst_path[PATH_MAX];
+                        snprintf(dst_path, PATH_MAX, "%s/%s", app->cwd, new_name);
+
+                        if (copy_path(src_path, dst_path))
+                        {
+                                strcpy(act->moves[act->count].src_path, src_path);
+                                strcpy(act->moves[act->count].dst_path, dst_path);
+                                act->count++;
+                        }
+                }
+                if (act->count > 0)
+                {
+                        ui_action_push(cb_undo_copy, cb_redo_copy, cb_free_copy, act);
+                }
+                else
+                {
+                        cb_free_copy(act);
+                }
+                strcpy(app->next_dir, ".");
+                *key = 0;
+        }
+
         if (*key == KEY_ESC)
         {
                 s->carrying = false;
@@ -516,7 +860,7 @@ void handle_input(AppState *app, int *key, const UIListParams *params)
                                 raw char new_path[PATH_MAX];
                                 snprintf(new_path, PATH_MAX, "%s/%s", app->cwd, app->carried[i].entry.name);
 
-                                (rename(app->carried[i].path, new_path) == 0) orelse continue;
+                                (move_path(app->carried[i].path, new_path)) orelse continue;
 
                                 strcpy(act->moves[act->count].old_path, app->carried[i].path);
                                 strcpy(act->moves[act->count].new_path, new_path);
@@ -665,7 +1009,7 @@ void app_process_drops(AppState *app)
                 raw char new_path[PATH_MAX];
                 snprintf(new_path, PATH_MAX, "%s/%s/%s", app->cwd, app->entries[dst].name, temp_carried[i].entry.name);
 
-                (rename(temp_carried[i].path, new_path) == 0) orelse continue;
+                (move_path(temp_carried[i].path, new_path)) orelse continue;
 
                 strcpy(act->moves[act->count].old_path, temp_carried[i].path);
                 strcpy(act->moves[act->count].new_path, new_path);
@@ -695,23 +1039,38 @@ void app_render_ui(AppState *app, UIListParams *params, int key)
 
         ui_list_tick_animations(s, active_r.x, active_r.y);
 
+        UIItemResult *cached_items = NULL;
+        if (app->count > 0)
+        {
+                cached_items = malloc(app->count * sizeof(UIItemResult));
+                if (!cached_items)
+                {
+                        ui_list_end(s);
+                        return;
+                }
+        }
+
+        for (int i = 0; i < app->count; i++)
+        {
+                if (!ui_list_do_item(s, i, &cached_items[i]))
+                {
+                        cached_items[i].w = -1;
+                }
+                else if (cached_items[i].hovered)
+                {
+                        app->last_hovered_idx = i;
+                }
+        }
+        ui_list_end(s);
+
         for (int pass = 0; pass < 2; pass++)
         {
                 for (int i = 0; i < app->count; i++)
                 {
-                        UIItemResult item;
-                        UIRect item_r = ui_list_item_rect(s, i);
+                        if (cached_items[i].w == -1)
+                                continue;
 
-                        if (pass == 0)
-                        {
-                                ui_list_do_item(s, i, &item) orelse continue;
-                                if (item.hovered)
-                                        app->last_hovered_idx = i;
-                        }
-                        else
-                        {
-                                item = (UIItemResult){.x = item_r.x, .y = item_r.y, .w = item_r.w, .h = item_r.h};
-                        }
+                        UIItemResult item = cached_items[i];
 
                         if (strcmp(app->entries[i].name, "..") == 0)
                         {
@@ -742,21 +1101,29 @@ void app_render_ui(AppState *app, UIListParams *params, int key)
                                                 is_popping = true;
                         }
 
-                        if (pass == 0 && !is_dropped)
-                                draw_item(app, &app->entries[i], &item, is_sel, is_ghost, false, is_popping);
+                        bool is_ctx_target = (global_ctx.active && s->selections[i]);
+                        bool is_pressed = item.pressed;
+                        bool draw_on_top = (is_ctx_target || is_pressed);
+
+                        if (pass == 0 && !is_dropped && !draw_on_top)
+                                draw_item(app, &app->entries[i], &item, is_sel, is_ghost, false, is_popping, false, false);
+
+                        if (pass == 1 && !is_dropped && draw_on_top)
+                                draw_item(app, &app->entries[i], &item, is_sel, is_ghost, false, is_popping, is_pressed, is_ctx_target);
 
                         int anim_x, anim_y;
                         if (pass == 1 && ui_list_get_anim_coords(s, item.x, item.y, is_dropped, is_carried || is_picked_up_mouse, &anim_x, &anim_y))
                         {
-                                draw_item_grid(app, &app->entries[i], anim_x, anim_y, 14, 7, is_sel, false, false, false, false, is_dropped, is_popping);
+                                draw_item_grid(app, &app->entries[i], anim_x, anim_y, 14, 7, is_sel, false, false, false, false, is_dropped, is_popping, false, false);
                         }
 
                         if (pass == 0 && item.right_clicked)
                                 ui_context_open(i);
                 }
-                if (pass == 0)
-                        ui_list_end(s);
         }
+
+        if (cached_items)
+                free(cached_items);
 
         ui_rect(0, 0, term_width, params->y, clr_bg);
         ui_rect(0, 0, term_width, 1, clr_bar);
@@ -765,22 +1132,29 @@ void app_render_ui(AppState *app, UIListParams *params, int key)
         ui_text(1, 0, header, (Color){0}, clr_bar, false, false);
 
         ui_rect(0, term_height - 1, term_width, 1, clr_bar);
-        ui_text(1, term_height - 1, s->carrying ? " Arrows: Navigate | Enter: Drop | 'Tab': Drop Here | Esc: Cancel " : " Arrows: Navigate | Space: Select | Tab: Move | u: Undo | r: Redo | Esc: Cancel ", (Color){0}, clr_bar, false, false);
+        ui_text(1, term_height - 1, s->carrying ? " Arrows: Navigate | Enter: Drop | 'Tab': Drop Here | Esc: Cancel " : " Space: Sel | Tab: Move | c: Copy | p: Paste | Del: Trash | u/r: Undo/Redo ", (Color){0}, clr_bar, false, false);
 
         const char *menu_options[] = {"Open", "Rename", "Delete", "Cancel"};
         int selected_action = -1;
-        if (ui_context_do(menu_options, 4, &selected_action) && selected_action == 0)
+        if (ui_context_do(menu_options, 4, &selected_action))
         {
-                raw char ctx_path[PATH_MAX];
-                snprintf(ctx_path, PATH_MAX, "%s/%s", app->cwd, app->entries[ui_context_target()].name);
-                if (app->entries[ui_context_target()].is_dir && !is_item_carried(app, ctx_path))
-                        strcpy(app->next_dir, app->entries[ui_context_target()].name);
+                if (selected_action == 0)
+                {
+                        raw char ctx_path[PATH_MAX];
+                        snprintf(ctx_path, PATH_MAX, "%s/%s", app->cwd, app->entries[ui_context_target()].name);
+                        if (app->entries[ui_context_target()].is_dir && !is_item_carried(app, ctx_path))
+                                strcpy(app->next_dir, app->entries[ui_context_target()].name);
+                }
+                else if (selected_action == 2)
+                {
+                        app_do_delete(app, ui_context_target());
+                }
         }
 
         int fly_x, fly_y;
         if (ui_list_get_fly_coords(s, &fly_x, &fly_y))
         {
-                draw_item_grid(app, &app->fly_entry, fly_x, fly_y, 14, 7, false, false, false, false, false, false, false);
+                draw_item_grid(app, &app->fly_entry, fly_x, fly_y, 14, 7, false, false, false, false, false, false, false, false, false);
         }
 
         int current_drag = s->is_dragging ? s->drag_idx : s->kb_drag_idx;
@@ -795,7 +1169,7 @@ void app_render_ui(AppState *app, UIListParams *params, int key)
                                         drag_count++;
 
                 FileEntry *ghost_entry = s->carrying ? &app->carried[0].entry : &app->entries[current_drag];
-                draw_item_grid(app, ghost_entry, (int)s->carry_x, (int)s->carry_y, 14, 7, false, false, true, false, false, false, false);
+                draw_item_grid(app, ghost_entry, (int)s->carry_x, (int)s->carry_y, 14, 7, false, false, true, false, false, false, false, false, false);
                 ui_draw_badge((int)s->carry_x + 10, (int)s->carry_y - 1, drag_count == 0 && !s->carrying ? 1 : drag_count);
         }
 }
@@ -807,11 +1181,17 @@ int main(void)
         defer ui_action_clear();
 
         AppState app;
+        memset(&app, 0, sizeof(AppState));
         app.last_hovered_idx = -1;
         defer free(app.entries);
         defer free(app.carried);
         defer free(app.drop_paths);
         defer free(app.pop_paths);
+        defer free(app.clipboard);
+
+        snprintf(app.trash_dir, PATH_MAX, "/tmp/prism_trash_%d", getpid());
+        mkdir(app.trash_dir, 0777);
+        defer rm_rf(app.trash_dir);
 
         app_load_dir(&app, ".");
 
