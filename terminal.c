@@ -30,6 +30,7 @@
 #define KEY_ESC 27
 #define KEY_BACKSPACE 127
 #define KEY_CTRL_BACKSPACE 1011
+#define KEY_F1 1012
 
 #define KEY_SHIFT_PAGE_DOWN 1009
 #define KEY_DELETE 1010
@@ -515,6 +516,12 @@ int term_poll(int timeout_ms)
                                                 continue;
                                         }
                                 }
+                                else if (i + 4 < n && buf[i + 4] == '~' && buf[i + 2] == '1' && buf[i + 3] == '1')
+                                {
+                                        key = KEY_F1;
+                                        i += 4;
+                                        continue;
+                                }
                                 else if (i + 5 < n && buf[i + 5] == '~' && buf[i + 3] == ';' && buf[i + 4] == '2')
                                 {
                                         key = (buf[i + 2] == '5') ? KEY_SHIFT_PAGE_UP : (buf[i + 2] == '6') ? KEY_SHIFT_PAGE_DOWN
@@ -542,6 +549,7 @@ int term_poll(int timeout_ms)
                                 else if (i + 2 < n && buf[i + 1] == 'O')
                                 {
                                         key = (buf[i + 2] == 'F') ? KEY_END : (buf[i + 2] == 'H') ? KEY_HOME
+                                                                          : (buf[i + 2] == 'P')   ? KEY_F1
                                                                                                   : 0;
                                         if (key)
                                         {

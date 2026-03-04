@@ -702,9 +702,20 @@ void app_load_dir(AppState *app, const char *path)
                 }
         }
 }
+
 void handle_input(AppState *app, int *key, const UIListParams *params)
 {
         UIListState *s = &app->list;
+
+        if (*key == 1) // Ctrl+A
+        {
+                for (int i = 0; i < app->count; i++)
+                {
+                        if (strcmp(app->entries[i].name, "..") != 0)
+                                s->selections[i] = true;
+                }
+                *key = 0;
+        }
 
         if (*key == 'u' || *key == 26)
         {
@@ -721,8 +732,11 @@ void handle_input(AppState *app, int *key, const UIListParams *params)
 
         if (*key == 'q' && !s->carrying)
                 app->quit = true;
-        if (*key == 'v')
+
+        // Toggle view with the '1' key
+        if (*key == '1')
                 ui_list_set_mode(s, params, !s->mode);
+
         if (*key == KEY_BACKSPACE)
                 strcpy(app->next_dir, "..");
 
@@ -757,6 +771,10 @@ void handle_input(AppState *app, int *key, const UIListParams *params)
                         };
                         act->count = 0;
                         act->app = app;
+
+                        app->pop_count = 0;
+                        app->pop_anim = 1.0f;
+                        app->pop_is_out = false;
 
                         for (int i = 0; i < app->count; i++)
                         {
@@ -798,6 +816,13 @@ void handle_input(AppState *app, int *key, const UIListParams *params)
                                                         strcpy(act->moves[act->count].src_path, src_path);
                                                         strcpy(act->moves[act->count].dst_path, dst_path);
                                                         act->count++;
+
+                                                        if (app->pop_count + 1 > app->pop_cap)
+                                                        {
+                                                                app->pop_cap = app->pop_cap ? app->pop_cap * 2 : 64;
+                                                                app->pop_paths = realloc(app->pop_paths, app->pop_cap * PATH_MAX) orelse continue;
+                                                        }
+                                                        strcpy(app->pop_paths[app->pop_count++], dst_path);
                                                 }
                                         }
                                 }
@@ -856,6 +881,10 @@ void handle_input(AppState *app, int *key, const UIListParams *params)
                         act->count = 0;
                         act->app = app;
 
+                        app->pop_count = 0;
+                        app->pop_anim = 1.0f;
+                        app->pop_is_out = false;
+
                         for (int i = 0; i < app->clipboard_count; i++)
                         {
                                 char *src_path = app->clipboard[i];
@@ -894,6 +923,13 @@ void handle_input(AppState *app, int *key, const UIListParams *params)
                                         strcpy(act->moves[act->count].src_path, src_path);
                                         strcpy(act->moves[act->count].dst_path, dst_path);
                                         act->count++;
+
+                                        if (app->pop_count + 1 > app->pop_cap)
+                                        {
+                                                app->pop_cap = app->pop_cap ? app->pop_cap * 2 : 64;
+                                                app->pop_paths = realloc(app->pop_paths, app->pop_cap * PATH_MAX) orelse continue;
+                                        }
+                                        strcpy(app->pop_paths[app->pop_count++], dst_path);
                                 }
                         }
                         if (act->count > 0)
@@ -1273,7 +1309,7 @@ void app_render_ui(AppState *app, UIListParams *params, int key)
         ui_text(1, 0, header, (Color){0}, clr_bar, false, false);
 
         ui_rect(0, term_height - 1, term_width, 1, clr_bar);
-        ui_text(1, term_height - 1, s->carrying ? " Arrows: Navigate | Enter: Drop | 'Tab': Drop Here | Esc: Cancel " : " Space: Sel | Tab: Move | Ctrl+C/V/D: Copy/Paste/Dup | Del/Ctrl+BS: Trash ", (Color){0}, clr_bar, false, false);
+        ui_text(1, term_height - 1, s->carrying ? " Arrows: Navigate | Enter: Drop | 'Tab': Drop Here | Esc: Cancel " : " 1: View | Space: Sel | Tab: Move | Ctrl+C/V/D: Copy/Paste/Dup | Del/Ctrl+BS: Trash ", (Color){0}, clr_bar, false, false);
 
         const char *menu_options[] = {"Open", "Rename", "Delete", "Cancel"};
         int selected_action = -1;
@@ -1341,7 +1377,7 @@ int main(void)
         while (!app.quit)
         {
                 UIListState *s = &app.list;
-                int timeout = (app.next_dir[0] || ui_list_is_animating(s) || app.pop_anim > 0.0f) ? term_anim_timeout : 1000;
+                int timeout = (app.next_dir[0] || ui_list_is_animating(s) || app.pop_anim > 0.0f || term_particle_count > 0) ? term_anim_timeout : 1000;
 
                 int key = term_poll(first_frame ? 0 : timeout);
                 UIListParams params = {0, 1, term_width, term_height - 2 > 0 ? term_height - 2 : 1, app.count, 14, 7, clr_bg, {30, 30, 30}, clr_bar};
