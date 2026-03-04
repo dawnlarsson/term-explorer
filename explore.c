@@ -316,12 +316,16 @@ void app_do_delete(AppState *app, int target_idx)
         }
 
         int count = 0;
+        int last_deleted = -1;
         for (int i = 0; i < app->count; i++)
         {
                 if ((drag_multi && s->selections[i]) || (!drag_multi && i == target_idx))
                 {
                         if (strcmp(app->entries[i].name, "..") != 0)
+                        {
                                 count++;
+                                last_deleted = i;
+                        }
                 }
         }
 
@@ -336,6 +340,10 @@ void app_do_delete(AppState *app, int target_idx)
         };
         act->count = 0;
         act->app = app;
+
+        app->pop_count = 0;
+        app->pop_anim = 1.0f;
+        app->pop_is_out = true;
 
         for (int i = 0; i < app->count; i++)
         {
@@ -354,10 +362,53 @@ void app_do_delete(AppState *app, int target_idx)
                                         strcpy(act->moves[act->count].old_path, src_path);
                                         strcpy(act->moves[act->count].new_path, dst_path);
                                         act->count++;
+
+                                        if (app->pop_count + 1 > app->pop_cap)
+                                        {
+                                                app->pop_cap = app->pop_cap ? app->pop_cap * 2 : 64;
+                                                app->pop_paths = realloc(app->pop_paths, app->pop_cap * PATH_MAX) orelse continue;
+                                        }
+                                        strcpy(app->pop_paths[app->pop_count++], src_path);
+
+                                        UIRect r = ui_list_item_rect(s, i);
+                                        ui_burst_particles(r.x + r.w / 2, r.y + r.h / 2, 15, clr_text);
                                 }
                         }
                 }
         }
+
+        int next_sel = -1;
+        for (int i = last_deleted + 1; i < app->count; i++)
+        {
+                if (!drag_multi && i != target_idx)
+                {
+                        next_sel = i;
+                        break;
+                }
+                if (drag_multi && !s->selections[i])
+                {
+                        next_sel = i;
+                        break;
+                }
+        }
+        if (next_sel == -1)
+        {
+                for (int i = last_deleted - 1; i >= 0; i--)
+                {
+                        if (!drag_multi && i != target_idx)
+                        {
+                                next_sel = i;
+                                break;
+                        }
+                        if (drag_multi && !s->selections[i])
+                        {
+                                next_sel = i;
+                                break;
+                        }
+                }
+        }
+        if (next_sel != -1)
+                s->selected_idx = next_sel;
 
         if (act->count > 0)
         {
@@ -651,7 +702,6 @@ void app_load_dir(AppState *app, const char *path)
                 }
         }
 }
-
 void handle_input(AppState *app, int *key, const UIListParams *params)
 {
         UIListState *s = &app->list;
@@ -676,13 +726,96 @@ void handle_input(AppState *app, int *key, const UIListParams *params)
         if (*key == KEY_BACKSPACE)
                 strcpy(app->next_dir, "..");
 
-        if (*key == KEY_DELETE)
+        if (*key == KEY_DELETE || *key == KEY_CTRL_BACKSPACE)
         {
                 app_do_delete(app, -1);
                 *key = 0;
         }
 
-        if (*key == 'c')
+        if (*key == 4) // Ctrl+D -> Duplicate
+        {
+                bool drag_multi = false;
+                for (int i = 0; i < app->count; i++)
+                        if (s->selections[i])
+                                drag_multi = true;
+
+                int src = s->selected_idx != -1 ? s->selected_idx : (app->last_hovered_idx == -1 ? 0 : app->last_hovered_idx);
+
+                int dup_count = 0;
+                for (int i = 0; i < app->count; i++)
+                        if ((drag_multi && s->selections[i]) || (!drag_multi && i == src))
+                                if (strcmp(app->entries[i].name, "..") != 0)
+                                        dup_count++;
+
+                if (dup_count > 0)
+                {
+                        CopyAction *act = malloc(sizeof(CopyAction)) orelse return;
+                        act->moves = malloc(sizeof(CopyMove) * dup_count) orelse
+                        {
+                                free(act);
+                                return;
+                        };
+                        act->count = 0;
+                        act->app = app;
+
+                        for (int i = 0; i < app->count; i++)
+                        {
+                                if ((drag_multi && s->selections[i]) || (!drag_multi && i == src))
+                                {
+                                        if (strcmp(app->entries[i].name, "..") != 0)
+                                        {
+                                                char src_path[PATH_MAX];
+                                                snprintf(src_path, PATH_MAX, "%s/%s", app->cwd, app->entries[i].name);
+
+                                                char base_name[256];
+                                                strncpy(base_name, app->entries[i].name, 255);
+                                                base_name[255] = '\0';
+
+                                                char *dot = strrchr(base_name, '.');
+                                                char ext[256] = "";
+                                                if (dot && dot != base_name)
+                                                {
+                                                        strcpy(ext, dot);
+                                                        *dot = '\0';
+                                                }
+
+                                                char dst_path[PATH_MAX];
+                                                char new_name[512];
+                                                int copy_num = 0;
+                                                struct stat st;
+                                                do
+                                                {
+                                                        if (copy_num == 0)
+                                                                snprintf(new_name, 512, "%s.copy%s", base_name, ext);
+                                                        else
+                                                                snprintf(new_name, 512, "%s.copy%d%s", base_name, copy_num, ext);
+                                                        snprintf(dst_path, PATH_MAX, "%s/%s", app->cwd, new_name);
+                                                        copy_num++;
+                                                } while (stat(dst_path, &st) == 0);
+
+                                                if (copy_path(src_path, dst_path))
+                                                {
+                                                        strcpy(act->moves[act->count].src_path, src_path);
+                                                        strcpy(act->moves[act->count].dst_path, dst_path);
+                                                        act->count++;
+                                                }
+                                        }
+                                }
+                        }
+                        if (act->count > 0)
+                        {
+                                ui_action_push(cb_undo_copy, cb_redo_copy, cb_free_copy, act);
+                        }
+                        else
+                        {
+                                cb_free_copy(act);
+                        }
+                        strcpy(app->next_dir, ".");
+                }
+                *key = 0;
+        }
+
+        if (*key == 'c' || *key == 3) // Ctrl+C or c
         {
                 app->clipboard_count = 0;
                 bool drag_multi = false;
@@ -710,61 +843,69 @@ void handle_input(AppState *app, int *key, const UIListParams *params)
                 *key = 0;
         }
 
-        if (*key == 'p' && app->clipboard_count > 0)
+        if (*key == 'p' || *key == 22) // Ctrl+V or p
         {
-                CopyAction *act = malloc(sizeof(CopyAction)) orelse return;
-                act->moves = malloc(sizeof(CopyMove) * app->clipboard_count) orelse
+                if (app->clipboard_count > 0)
                 {
-                        free(act);
-                        return;
-                };
-                act->count = 0;
-                act->app = app;
-
-                for (int i = 0; i < app->clipboard_count; i++)
-                {
-                        char *src_path = app->clipboard[i];
-                        char *base = strrchr(src_path, '/');
-                        base = base ? base + 1 : src_path;
-
-                        char base_name[256];
-                        strncpy(base_name, base, 255);
-                        base_name[255] = '\0';
-
-                        char new_name[512];
-                        char *dot = strrchr(base_name, '.');
-
-                        if (dot && dot != base_name)
+                        CopyAction *act = malloc(sizeof(CopyAction)) orelse return;
+                        act->moves = malloc(sizeof(CopyMove) * app->clipboard_count) orelse
                         {
-                                char ext[256];
-                                strcpy(ext, dot);
-                                *dot = '\0';
-                                snprintf(new_name, 512, "%s.copy%s", base_name, ext);
+                                free(act);
+                                return;
+                        };
+                        act->count = 0;
+                        act->app = app;
+
+                        for (int i = 0; i < app->clipboard_count; i++)
+                        {
+                                char *src_path = app->clipboard[i];
+                                char *base = strrchr(src_path, '/');
+                                base = base ? base + 1 : src_path;
+
+                                char base_name[256];
+                                strncpy(base_name, base, 255);
+                                base_name[255] = '\0';
+
+                                char *dot = strrchr(base_name, '.');
+                                char ext[256] = "";
+
+                                if (dot && dot != base_name)
+                                {
+                                        strcpy(ext, dot);
+                                        *dot = '\0';
+                                }
+
+                                char dst_path[PATH_MAX];
+                                char new_name[512];
+                                int copy_num = 0;
+                                struct stat st;
+                                do
+                                {
+                                        if (copy_num == 0)
+                                                snprintf(new_name, 512, "%s.copy%s", base_name, ext);
+                                        else
+                                                snprintf(new_name, 512, "%s.copy%d%s", base_name, copy_num, ext);
+                                        snprintf(dst_path, PATH_MAX, "%s/%s", app->cwd, new_name);
+                                        copy_num++;
+                                } while (stat(dst_path, &st) == 0);
+
+                                if (copy_path(src_path, dst_path))
+                                {
+                                        strcpy(act->moves[act->count].src_path, src_path);
+                                        strcpy(act->moves[act->count].dst_path, dst_path);
+                                        act->count++;
+                                }
+                        }
+                        if (act->count > 0)
+                        {
+                                ui_action_push(cb_undo_copy, cb_redo_copy, cb_free_copy, act);
                         }
                         else
                         {
-                                snprintf(new_name, 512, "%s.copy", base_name);
+                                cb_free_copy(act);
                         }
-
-                        char dst_path[PATH_MAX];
-                        snprintf(dst_path, PATH_MAX, "%s/%s", app->cwd, new_name);
-
-                        if (copy_path(src_path, dst_path))
-                        {
-                                strcpy(act->moves[act->count].src_path, src_path);
-                                strcpy(act->moves[act->count].dst_path, dst_path);
-                                act->count++;
-                        }
+                        strcpy(app->next_dir, ".");
                 }
-                if (act->count > 0)
-                {
-                        ui_action_push(cb_undo_copy, cb_redo_copy, cb_free_copy, act);
-                }
-                else
-                {
-                        cb_free_copy(act);
-                }
-                strcpy(app->next_dir, ".");
                 *key = 0;
         }
 
@@ -1132,7 +1273,7 @@ void app_render_ui(AppState *app, UIListParams *params, int key)
         ui_text(1, 0, header, (Color){0}, clr_bar, false, false);
 
         ui_rect(0, term_height - 1, term_width, 1, clr_bar);
-        ui_text(1, term_height - 1, s->carrying ? " Arrows: Navigate | Enter: Drop | 'Tab': Drop Here | Esc: Cancel " : " Space: Sel | Tab: Move | c: Copy | p: Paste | Del: Trash | u/r: Undo/Redo ", (Color){0}, clr_bar, false, false);
+        ui_text(1, term_height - 1, s->carrying ? " Arrows: Navigate | Enter: Drop | 'Tab': Drop Here | Esc: Cancel " : " Space: Sel | Tab: Move | Ctrl+C/V/D: Copy/Paste/Dup | Del/Ctrl+BS: Trash ", (Color){0}, clr_bar, false, false);
 
         const char *menu_options[] = {"Open", "Rename", "Delete", "Cancel"};
         int selected_action = -1;
