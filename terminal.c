@@ -94,6 +94,7 @@ typedef struct
 typedef struct
 {
         bool active;
+        void *id;
         int x, y, w, h;
         UIListState list;
 } UIContextState;
@@ -151,6 +152,8 @@ typedef struct
         int root;
         View bounds;
         int active_leaf;
+        int last_active_leaf;
+        float switch_flash;
         int dragging_tab;
         int drag_src_leaf;
         int drag_start_x;
@@ -165,6 +168,7 @@ typedef struct
 typedef struct
 {
         const char *label;
+        const char *title; /* The full path/info to show in the bar */
         bool active, closable;
 } UITab;
 
@@ -200,6 +204,8 @@ float term_dt_scale = 1.0f;
 static struct termios orig_termios;
 static volatile int resize_flag = 1;
 static View *active_view = NULL;
+static const char *current_cursor = "text";
+static const char *next_cursor = "default";
 static bool mouse_suppressed = false;
 static Cell *canvas, *last_canvas;
 static int fd_m = -1, fd_touch = -1, raw_mx, raw_my, color_mode;
@@ -318,38 +324,28 @@ static int ui_list_cols(const UIListState *s)
         return (s->mode == UI_MODE_LIST) ? 1 : ((s->p.w - 1) / s->p.cell_w > 0 ? (s->p.w - 1) / s->p.cell_w : 1);
 }
 
-static int ui_list_grid_gap_x(const UIListState *s)
-{
-        if (s->mode == UI_MODE_LIST)
-                return 0;
-        int cols = ui_list_cols(s);
-        int extra = (s->p.w - 1) - cols * s->p.cell_w;
-        if (extra < 0)
-                extra = 0;
-        return cols > 1 ? extra / (cols + 1) : 0;
-}
-
-static int ui_list_grid_offset_x(const UIListState *s)
-{
-        if (s->mode == UI_MODE_LIST)
-                return 0;
-        int cols = ui_list_cols(s);
-        int extra = (s->p.w - 1) - cols * s->p.cell_w;
-        if (extra < 0)
-                extra = 0;
-        return cols > 1 ? extra / (cols + 1) : extra / 2;
-}
-
 UIRect ui_list_item_rect(const UIListState *s, int index)
 {
         int cols = ui_list_cols(s);
         int c_w = (s->mode == UI_MODE_LIST) ? s->p.w - 1 : s->p.cell_w;
         int c_h = (s->mode == UI_MODE_LIST) ? 1 : s->p.cell_h;
-        int gap_x = ui_list_grid_gap_x(s);
-        int off_x = ui_list_grid_offset_x(s);
+        
+        int col_idx = index % cols;
+        int row_idx = index / cols;
+        
+        int x_pos = s->p.x;
+        if (s->mode != UI_MODE_LIST)
+        {
+                int extra = (s->p.w - 1) - cols * c_w;
+                if (extra < 0)
+                        extra = 0;
+                int dynamic_off_x = ((col_idx + 1) * extra) / (cols + 1);
+                x_pos = s->p.x + dynamic_off_x + col_idx * c_w;
+        }
+
         return (UIRect){
-            .x = s->mode == UI_MODE_LIST ? s->p.x : s->p.x + off_x + (index % cols) * (c_w + gap_x),
-            .y = s->p.y + (index / cols * c_h) - (int)(s->current_scroll + 0.5f),
+            .x = x_pos,
+            .y = s->p.y + (row_idx * c_h) - (int)(s->current_scroll + 0.5f),
             .w = c_w,
             .h = c_h};
 }
@@ -461,6 +457,7 @@ static int rgb_to_ansi16(Color c, bool is_bg)
 void term_restore(void)
 {
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
+        printf("\033]22;text\007"); /* Restore the default terminal text cursor */
         printf("\033%%@\033[0m\033[2J\033[H\033[?25h\033[?7h\033[?1006l\033[?1015l\033[?1003l");
         fflush(stdout);
         if (fd_m >= 0)
@@ -791,6 +788,7 @@ int term_poll(int timeout_ms)
 
 void ui_begin(void)
 {
+        next_cursor = "default";
         static long long last_time;
         raw struct timeval tv;
         gettimeofday(&tv, NULL);
@@ -817,6 +815,7 @@ void ui_begin(void)
 }
 
 void ui_set_view(View *v) { active_view = v; }
+void ui_set_cursor(const char *cursor) { next_cursor = cursor; }
 void ui_suppress_mouse(bool suppress) { mouse_suppressed = suppress; }
 void ui_rect(int x, int y, int w, int h, Color bg);
 Mouse ui_get_mouse(void)
@@ -908,12 +907,22 @@ void ui_text_centered(int x, int y, int w, const char *txt, Color fg, Color bg, 
         ui_text(px < x ? x : px, y, txt, fg, bg, bold, invert);
 }
 
-UITabBarResult ui_tab_bar(int w, const UITab *tabs, int count, bool show_add, Color bar_bg, Color active_bg)
+UITabBarResult ui_tab_bar(int w, const UITab *tabs, int count, bool show_add, bool is_active_pane, float switch_flash)
 {
         UITabBarResult res = {.clicked_tab = -1, .close_tab = -1, .add_clicked = false};
-        Color inactive_bg = (Color){60, 60, 60};
-        Color active_fg = (Color){255, 255, 255};
-        Color inactive_fg = (Color){140, 140, 140};
+        Color bar_bg = (Color){0, 0, 0};
+        
+        Color active_bg = is_active_pane ? (Color){255, 255, 255} : (Color){150, 150, 150};
+        Color active_fg = (Color){0, 0, 0};
+        
+        if (is_active_pane && switch_flash > 0.0f) {
+            float t = switch_flash;
+            active_bg = (Color){255 * (1-t), 255 * (1-t), 255 * (1-t)};
+            active_fg = (Color){255 * t, 255 * t, 255 * t};
+        }
+
+        Color inactive_bg = is_active_pane ? (Color){150, 150, 150} : (Color){80, 80, 80};
+        Color inactive_fg = (Color){50, 50, 50};
         Color close_fg = (Color){180, 80, 80};
         Color add_fg = (Color){100, 200, 100};
 
@@ -921,8 +930,13 @@ UITabBarResult ui_tab_bar(int w, const UITab *tabs, int count, bool show_add, Co
 
         Mouse m = ui_get_mouse();
         int tx = 0;
+        const char *active_title = NULL;
+
         for (int i = 0; i < count; i++)
         {
+                if (tabs[i].active && tabs[i].title)
+                        active_title = tabs[i].title;
+
                 const char *label = tabs[i].label ? tabs[i].label : "";
                 int name_len = 0;
                 for (const char *c = label; *c; c++)
@@ -943,12 +957,16 @@ UITabBarResult ui_tab_bar(int w, const UITab *tabs, int count, bool show_add, Co
                 if (tabs[i].closable)
                         ui_text(tx + tab_w - 2, 0, "×", close_fg, tab_bg, false, false);
 
-                if (m.clicked && m.y == 0 && m.x >= tx && m.x < tx + tab_w)
+                if (m.y == 0 && m.x >= tx && m.x < tx + tab_w)
                 {
-                        if (tabs[i].closable && m.x == tx + tab_w - 2)
-                                res.close_tab = i;
-                        else
-                                res.clicked_tab = i;
+                        ui_set_cursor("pointer");
+                        if (m.clicked)
+                        {
+                                if (tabs[i].closable && m.x == tx + tab_w - 2)
+                                        res.close_tab = i;
+                                else
+                                        res.clicked_tab = i;
+                        }
                 }
 
                 tx += tab_w + 1;
@@ -956,9 +974,18 @@ UITabBarResult ui_tab_bar(int w, const UITab *tabs, int count, bool show_add, Co
 
         if (show_add && tx + 3 <= w)
         {
+                if (m.y == 0 && m.x >= tx && m.x < tx + 3)
+                        ui_set_cursor("pointer");
                 ui_text(tx, 0, " + ", add_fg, bar_bg, false, false);
                 if (m.clicked && m.y == 0 && m.x >= tx && m.x < tx + 3)
                         res.add_clicked = true;
+                tx += 4;
+        }
+
+        if (active_title && tx < w)
+        {
+                Color title_fg = is_active_pane ? (Color){255, 255, 255} : (Color){120, 120, 120};
+                ui_text(tx + 1, 0, active_title, title_fg, bar_bg, false, false);
         }
 
         return res;
@@ -980,12 +1007,18 @@ UISplitterLayout ui_splitter_h(float *frac, bool *dragging, int x, int y, int w,
                 return layout;
 
         int divider_x = x + (int)(w * *frac);
-        if (term_mouse.clicked && abs(term_mouse.x - divider_x) <= 1 && term_mouse.y >= y && term_mouse.y < y + h)
+        bool hovering = term_mouse.x == divider_x && term_mouse.y >= y && term_mouse.y < y + h;
+        if (hovering)
+                ui_set_cursor("ew-resize");
+
+        if (term_mouse.clicked && hovering)
                 *dragging = true;
         if (!term_mouse.left)
                 *dragging = false;
+
         if (*dragging)
         {
+                ui_set_cursor("ew-resize");
                 float f = (float)(term_mouse.x - x) / w;
                 if (f < min_frac)
                         f = min_frac;
@@ -1006,7 +1039,8 @@ void ui_splitter_h_draw(const UISplitterLayout *layout, bool dragging, int y, in
 {
         if (!layout || layout->second.w <= 0)
                 return;
-        Color div = dragging ? (Color){255, 255, 255} : divider_fg;
+        bool hover = (term_mouse.x == layout->divider_x && term_mouse.y >= y && term_mouse.y < y + h);
+        Color div = (dragging || hover) ? (Color){255, 255, 255} : divider_fg;
         for (int row = y; row < y + h; row++)
                 ui_text(layout->divider_x, row, "│", div, bg, false, false);
 }
@@ -1185,7 +1219,10 @@ static void ui_dock_layout_node(UIDockState *dock, int node_idx, View view)
         if (node->kind == UI_DOCK_NODE_LEAF)
                 return;
 
-        UISplitterLayout split = ui_splitter_h(&node->split_frac, &node->dragging_splitter, view.x, view.y, view.w, view.h, true, 0.15f, 0.85f);
+        float min_f = 2.0f / (float)(view.w > 0 ? view.w : 1);
+        if (min_f > 0.4f) min_f = 0.4f;
+        
+        UISplitterLayout split = ui_splitter_h(&node->split_frac, &node->dragging_splitter, view.x, view.y, view.w, view.h, true, min_f, 1.0f - min_f);
         ui_dock_layout_node(dock, node->first, split.first);
         ui_dock_layout_node(dock, node->second, split.second);
 }
@@ -1354,7 +1391,7 @@ bool ui_dock_is_animating(const UIDockState *dock)
         if (!dock)
                 return false;
 
-        if (dock->dragging_tab >= 0 || dock->pending_tab >= 0)
+        if (dock->dragging_tab >= 0 || dock->pending_tab >= 0 || dock->switch_flash > 0.0f)
                 return true;
 
         for (int i = 0; i < UI_DOCK_MAX_NODES; i++)
@@ -1376,11 +1413,20 @@ void ui_dock_begin_frame(UIDockState *dock, int x, int y, int w, int h)
         if (!ui_dock_is_leaf_node(dock, dock->active_leaf))
                 dock->active_leaf = ui_dock_first_leaf_from(dock, dock->root);
 
-        if (term_mouse.clicked || term_mouse.wheel != 0 || term_mouse.left)
+        static int last_mx = -1, last_my = -1;
+        bool mouse_moved = (term_mouse.x != last_mx || term_mouse.y != last_my);
+        last_mx = term_mouse.x;
+        last_my = term_mouse.y;
+
+        if (term_mouse.clicked || term_mouse.wheel != 0)
         {
                 int leaf = ui_dock_leaf_at_point(dock, dock->root, term_mouse.x, term_mouse.y);
-                if (leaf >= 0)
+                if (leaf >= 0 && leaf != dock->active_leaf)
+                {
                         dock->active_leaf = leaf;
+                        global_ctx.active = false;
+                        global_ctx.w = 0;
+                }
         }
 }
 
@@ -1420,6 +1466,16 @@ void ui_dock_draw(UIDockState *dock, const UITab *tabs, int tab_count, Color bar
                 return;
         (void)tab_count;
 
+        if (dock->last_active_leaf != dock->active_leaf) {
+                dock->switch_flash = 1.0f;
+                dock->last_active_leaf = dock->active_leaf;
+        } else if (dock->switch_flash > 0.0f) {
+                extern float term_dt_scale;
+                dock->switch_flash -= 0.1f * term_dt_scale;
+                if (dock->switch_flash < 0.0f)
+                        dock->switch_flash = 0.0f;
+        }
+
         dock->close_request_tab = -1;
         dock->add_request_leaf = -1;
 
@@ -1444,7 +1500,7 @@ void ui_dock_draw(UIDockState *dock, const UITab *tabs, int tab_count, Color bar
                         leaf_tabs[i].closable = (leaf->tab_count > 1 || leaf_count > 1);
                 }
 
-                UITabBarResult bar = ui_tab_bar(leaf->view.w, leaf_tabs, leaf->tab_count, true, bar_bg, active_bg);
+                UITabBarResult bar = ui_tab_bar(leaf->view.w, leaf_tabs, leaf->tab_count, true, leaf_idx == dock->active_leaf, leaf_idx == dock->active_leaf ? dock->switch_flash : 0.0f);
                 if (leaf_idx == dock->active_leaf)
                 {
                         if (bar.close_tab >= 0)
@@ -1459,6 +1515,12 @@ void ui_dock_draw(UIDockState *dock, const UITab *tabs, int tab_count, Color bar
                         }
                         if (bar.add_clicked)
                                 dock->add_request_leaf = leaf_idx;
+
+                        Color corner_bg = (Color){255, 255, 255};
+                        
+                        ui_text(leaf->view.w - 1, 0, " ", corner_bg, corner_bg, false, false);
+                        ui_text(0, leaf->view.h - 1, " ", corner_bg, corner_bg, false, false);
+                        ui_text(leaf->view.w - 1, leaf->view.h - 1, " ", corner_bg, corner_bg, false, false);
                 }
         }
 
@@ -1641,6 +1703,13 @@ void ui_end(void)
                         *lc = *c;
                 }
         }
+        
+        if (strcmp(current_cursor, next_cursor) != 0)
+        {
+                current_cursor = next_cursor;
+                printf("\033]22;%s\007", current_cursor);
+        }
+
         printf("\x1b[0m\033[?2026l");
         fflush(stdout);
 }
@@ -1903,8 +1972,11 @@ void ui_list_begin(UIListState *s, const UIListParams *p, int key)
         if (!s->dragging_scroll && s->scroll_velocity == 0.0f)
         {
                 float snap = (float)(((int)(s->target_scroll + (c_h / 2.0f)) / c_h) * c_h);
-                if (snap <= max_scroll)
-                        s->target_scroll = snap;
+                if (max_scroll - s->target_scroll < c_h / 2.0f)
+                        snap = max_scroll;
+                else if (snap > max_scroll)
+                        snap = max_scroll;
+                s->target_scroll = snap;
         }
 
         if (!s->dragging_scroll)
@@ -1939,6 +2011,9 @@ bool ui_list_do_item(UIListState *s, int index, UIItemResult *res)
         res->hovered = (!s->ignore_mouse && !over_ctx_menu && !s->dragging_scroll && !s->is_box_selecting && ui_get_mouse().x >= r.x && ui_get_mouse().x < r.x + r.w && ui_get_mouse().y >= r.y && ui_get_mouse().y < r.y + r.h && ui_get_mouse().y >= s->p.y && ui_get_mouse().y < s->p.y + s->p.h && ui_get_mouse().x < s->p.x + s->p.w - 1);
 
         bool is_hit = (s->mode == UI_MODE_GRID) ? !(ui_get_mouse().x == r.x || ui_get_mouse().x == r.x + r.w - 1 || ui_get_mouse().y == r.y || ui_get_mouse().y == r.y + r.h - 1) : (ui_get_mouse().x <= r.x + 35);
+
+        if (res->hovered && is_hit)
+                ui_set_cursor("pointer");
 
         res->pressed = (res->hovered && ui_get_mouse().left);
         res->clicked = (res->hovered && ui_get_mouse().clicked);
@@ -2062,12 +2137,18 @@ void ui_list_end(UIListState *s)
         if (max_scroll > 0)
         {
                 bool hover = (!s->dragging_scroll && ui_get_mouse().x == s->p.x + s->p.w - 1 && ui_get_mouse().y >= s->p.y && ui_get_mouse().y < s->p.y + s->p.h);
-                Color thumb_col = s->dragging_scroll ? (Color){255, 255, 255} : s->p.scrollbar_fg;
+                
                 int thumb_h_half = (s->p.h * 2) * s->p.h / (rows * c_h);
                 if (thumb_h_half < 2)
                         thumb_h_half = 2;
                 int thumb_top_half = (int)((s->current_scroll / max_scroll) * (s->p.h * 2 - thumb_h_half));
                 int thumb_bot_half = thumb_top_half + thumb_h_half;
+
+                int my = ui_get_mouse().y - s->p.y;
+                int my_top = my * 2, my_bot = my * 2 + 1;
+                bool thumb_hover = hover && ((my_top >= thumb_top_half && my_top < thumb_bot_half) || (my_bot >= thumb_top_half && my_bot < thumb_bot_half));
+
+                Color thumb_col = (s->dragging_scroll || thumb_hover) ? (Color){255, 255, 255} : s->p.scrollbar_fg;
 
                 for (int y = 0; y < s->p.h; y++)
                 {
@@ -2187,9 +2268,9 @@ bool ui_list_get_fly_coords(UIListState *s, int *out_x, int *out_y)
         return false;
 }
 
-void ui_context_open(int target_idx)
+void ui_context_open(void *id, int target_idx)
 {
-        global_ctx = (UIContextState){.active = true, .x = ui_get_mouse().x, .y = ui_get_mouse().y, .w = 0};
+        global_ctx = (UIContextState){.active = true, .id = id, .x = ui_get_mouse().x, .y = ui_get_mouse().y, .w = 0};
         global_ctx.list.selected_idx = -1;
         global_ctx.list.mode = UI_MODE_LIST;
         global_ctx_target = target_idx;
@@ -2213,9 +2294,9 @@ void ui_draw_badge(int x, int y, int count)
         ui_text(x, y, badge, (Color){255, 255, 255}, (Color){200, 50, 50}, true, false);
 }
 
-bool ui_context_do(const char **items, int count, int *out_idx)
+bool ui_context_do(void *id, const char **items, int count, int *out_idx)
 {
-        if (!global_ctx.active)
+        if (!global_ctx.active || global_ctx.id != id)
                 return false;
 
         if (global_ctx.w == 0)
@@ -2230,15 +2311,18 @@ bool ui_context_do(const char **items, int count, int *out_idx)
                 global_ctx.w = max_w + 3;
                 global_ctx.h = count;
 
-                if (global_ctx.x + global_ctx.w > term_width)
-                        global_ctx.x = (term_width - global_ctx.w < 0) ? 0 : term_width - global_ctx.w;
-                if (global_ctx.y + global_ctx.h > term_height)
+                int vw = active_view ? active_view->w : term_width;
+                int vh = active_view ? active_view->h : term_height;
+
+                if (global_ctx.x + global_ctx.w > vw)
+                        global_ctx.x = (vw - global_ctx.w < 0) ? 0 : vw - global_ctx.w;
+                if (global_ctx.y + global_ctx.h > vh)
                 {
-                        global_ctx.h = term_height - global_ctx.y;
+                        global_ctx.h = vh - global_ctx.y;
                         if (global_ctx.h < 4 && count >= 4)
                         {
-                                global_ctx.y = (term_height - count < 0) ? 0 : term_height - count;
-                                global_ctx.h = (count > term_height) ? term_height : count;
+                                global_ctx.y = (vh - count < 0) ? 0 : vh - count;
+                                global_ctx.h = (count > vh) ? vh : count;
                         }
                 }
         }
