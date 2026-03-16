@@ -611,7 +611,8 @@ void draw_item_list(AppState *app, FileEntry *e, int x, int y, int w, int h, boo
 
         int right_margin = (!e->is_dir) ? 8 : 1;
         int max_name_len = w - name_x - right_margin;
-        if (max_name_len < 0) max_name_len = 0;
+        if (max_name_len < 0)
+                max_name_len = 0;
         int copy_len = max_name_len > 255 ? 255 : max_name_len;
 
         raw char l[256];
@@ -737,7 +738,8 @@ void app_load_dir(AppState *app, const char *path)
         while (1)
         {
                 struct dirent *dir = readdir(d);
-                if (!dir) break;
+                if (!dir)
+                        break;
                 if (!strcmp(dir->d_name, "."))
                         continue;
                 if (!strcmp(dir->d_name, ".."))
@@ -747,7 +749,8 @@ void app_load_dir(AppState *app, const char *path)
                 {
                         app->capacity = app->capacity ? app->capacity * 2 : 256;
                         app->entries = realloc(app->entries, app->capacity * sizeof(FileEntry));
-                        if (!app->entries) break;
+                        if (!app->entries)
+                                break;
                 }
 
                 raw struct stat st;
@@ -773,7 +776,7 @@ void app_load_dir(AppState *app, const char *path)
                 e->git_status[1] = '\0';
                 e->git_status[2] = '\0';
         }
-        
+
         if (!has_dot_dot && strcmp(app->cwd, "/") != 0)
         {
                 if (app->count >= app->capacity)
@@ -793,7 +796,7 @@ void app_load_dir(AppState *app, const char *path)
                         e->git_status[2] = '\0';
                 }
         }
-        
+
         if (app->entries)
                 qsort(app->entries, app->count, sizeof(FileEntry), cmp_entries);
 
@@ -1530,7 +1533,7 @@ void app_render_ui(AppState *app, UIListParams *params, int key)
         if (cached_items)
                 free(cached_items);
 
-        if (ui_get_mouse().right_clicked && 
+        if (ui_get_mouse().right_clicked &&
             ui_get_mouse().x >= params->x && ui_get_mouse().x < params->x + params->w &&
             ui_get_mouse().y >= params->y && ui_get_mouse().y < params->y + params->h)
         {
@@ -1548,11 +1551,14 @@ void app_render_ui(AppState *app, UIListParams *params, int key)
         const char *menu_options[10];
         int menu_count = 0;
 
-        if (is_empty) {
+        if (is_empty)
+        {
                 menu_options[menu_count++] = "New Folder";
                 menu_options[menu_count++] = "Close Tab";
                 menu_options[menu_count++] = "Cancel";
-        } else {
+        }
+        else
+        {
                 menu_options[menu_count++] = "Open";
                 if (is_dir)
                         menu_options[menu_count++] = "View in New Tab";
@@ -1569,13 +1575,15 @@ void app_render_ui(AppState *app, UIListParams *params, int key)
                 {
                         char new_path[PATH_MAX];
                         int iter = 0;
-                        while(1) {
+                        while (1)
+                        {
                                 if (iter == 0)
                                         snprintf(new_path, PATH_MAX, "%s/New Folder", app->cwd);
                                 else
                                         snprintf(new_path, PATH_MAX, "%s/New Folder %d", app->cwd, iter);
                                 struct stat st;
-                                if (stat(new_path, &st) != 0) {
+                                if (stat(new_path, &st) != 0)
+                                {
                                         mkdir(new_path, 0777);
                                         strcpy(app->next_dir, ".");
                                         break;
@@ -1585,7 +1593,7 @@ void app_render_ui(AppState *app, UIListParams *params, int key)
                 }
                 else if (strcmp(action_name, "Close Tab") == 0)
                 {
-                        int tab_id = (int)((AppTab*)app - tabs);
+                        int tab_id = (int)((AppTab *)app - tabs);
                         dock.close_request_tab = tab_id;
                 }
                 else if (strcmp(action_name, "Open") == 0)
@@ -1602,13 +1610,18 @@ void app_render_ui(AppState *app, UIListParams *params, int key)
                         int nt = add_tab(ctx_path);
                         if (nt >= 0)
                         {
-                                int tab_id = (int)((AppTab*)app - tabs);
+                                int tab_id = (int)((AppTab *)app - tabs);
                                 int count = ui_dock_leaf_count(&dock);
-                                for (int i = 0; i < count; i++) {
+                                for (int i = 0; i < count; i++)
+                                {
                                         int leaf = ui_dock_leaf_nth(&dock, i);
-                                        int at; bool act; View v;
-                                        if (ui_dock_leaf_get(&dock, leaf, &v, &at, &act)) {
-                                                if (at == tab_id) {
+                                        int at;
+                                        bool act;
+                                        View v;
+                                        if (ui_dock_leaf_get(&dock, leaf, &v, &at, &act))
+                                        {
+                                                if (at == tab_id)
+                                                {
                                                         ui_dock_add_tab_to_leaf(&dock, leaf, nt);
                                                         break;
                                                 }
@@ -1695,7 +1708,8 @@ void close_tab(int t)
         ui_dock_remove_tab(&dock, t);
 }
 
-typedef struct {
+typedef struct
+{
         UIDockState dock;
         int tab_count;
         char cwds[MAX_TABS][PATH_MAX];
@@ -1706,21 +1720,25 @@ typedef struct {
 bool load_layout(void)
 {
         const char *home = getenv("HOME");
-        if (!home) return false;
+        if (!home)
+                return false;
         char path[PATH_MAX];
         snprintf(path, PATH_MAX, "%s/.cache/explore_layout.bin", home);
         FILE *f = fopen(path, "rb");
-        if (!f) return false;
-        
+        if (!f)
+                return false;
+
         LayoutSave s;
-        if (fread(&s, sizeof(s), 1, f) != 1) {
+        if (fread(&s, sizeof(s), 1, f) != 1)
+        {
                 fclose(f);
                 return false;
         }
         fclose(f);
-        
-        if (s.tab_count < 0 || s.tab_count > MAX_TABS) return false;
-        
+
+        if (s.tab_count < 0 || s.tab_count > MAX_TABS)
+                return false;
+
         dock = s.dock;
         dock.dragging_tab = -1;
         dock.drag_src_leaf = -1;
@@ -1730,8 +1748,10 @@ bool load_layout(void)
         dock.add_request_leaf = -1;
 
         tab_count = s.tab_count;
-        for (int i = 0; i < tab_count; i++) {
-                if (s.cwds[i][0] != '\0') {
+        for (int i = 0; i < tab_count; i++)
+        {
+                if (s.cwds[i][0] != '\0')
+                {
                         memset(&tabs[i], 0, sizeof(AppTab));
                         tabs[i].in_use = true;
                         tabs[i].app.last_hovered_idx = -1;
@@ -1750,28 +1770,32 @@ bool load_layout(void)
 void save_layout(void)
 {
         const char *home = getenv("HOME");
-        if (!home) return;
+        if (!home)
+                return;
         char path[PATH_MAX];
         snprintf(path, PATH_MAX, "%s/.cache", home);
         mkdir(path, 0755);
         snprintf(path, PATH_MAX, "%s/.cache/explore_layout.bin", home);
-        
+
         FILE *f = fopen(path, "wb");
-        if (!f) return;
-        
+        if (!f)
+                return;
+
         LayoutSave s;
         memset(&s, 0, sizeof(s));
         s.dock = dock;
         s.tab_count = tab_count;
-        
-        for (int i = 0; i < tab_count; i++) {
-                if (tabs[i].in_use) {
+
+        for (int i = 0; i < tab_count; i++)
+        {
+                if (tabs[i].in_use)
+                {
                         strncpy(s.cwds[i], tabs[i].app.cwd, PATH_MAX);
                         s.modes[i] = tabs[i].app.list.mode;
                         s.scrolls[i] = tabs[i].app.list.target_scroll;
                 }
         }
-        
+
         fwrite(&s, sizeof(s), 1, f);
         fclose(f);
 }
@@ -1779,7 +1803,7 @@ void save_layout(void)
 int main(int argc, char **argv)
 {
         const char *start_dir = argc > 1 ? argv[1] : ".";
-        
+
         term_init() orelse return 1;
         defer term_restore();
         defer ui_action_clear();
@@ -1787,7 +1811,8 @@ int main(int argc, char **argv)
         memset(tabs, 0, sizeof(tabs));
         ui_dock_init(&dock);
 
-        if (!load_layout()) {
+        if (!load_layout())
+        {
                 int t0 = add_tab(start_dir);
                 int t1 = add_tab(start_dir);
                 ui_dock_add_tab_to_leaf(&dock, 0, t0);
@@ -1796,11 +1821,15 @@ int main(int argc, char **argv)
                         ui_dock_add_tab_to_leaf(&dock, second_leaf, t1);
                 else
                         ui_dock_add_tab_to_leaf(&dock, 0, t1);
-        } else {
+        }
+        else
+        {
                 int active_leaf = dock.active_leaf;
-                if (active_leaf >= 0 && active_leaf < UI_DOCK_MAX_NODES) {
+                if (active_leaf >= 0 && active_leaf < UI_DOCK_MAX_NODES)
+                {
                         int tab_id = dock.nodes[active_leaf].active_tab;
-                        if (tab_id >= 0 && tab_id < MAX_TABS && tabs[tab_id].in_use) {
+                        if (tab_id >= 0 && tab_id < MAX_TABS && tabs[tab_id].in_use)
+                        {
                                 app_load_dir(&tabs[tab_id].app, start_dir);
                                 tabs[tab_id].app.list.target_scroll = 0;
                                 tabs[tab_id].app.list.current_scroll = 0;
@@ -1854,6 +1883,13 @@ int main(int argc, char **argv)
 
 #define TAB_BAR_H 1
 
+                bool any_drag = false;
+                for (int i = 0; i < MAX_TABS; i++)
+                {
+                        if (tabs[i].in_use && tabs[i].app.list.is_dragging)
+                                any_drag = true;
+                }
+
                 int leaf_count = ui_dock_leaf_count(&dock);
                 for (int leaf_ord = 0; leaf_ord < leaf_count; leaf_ord++)
                 {
@@ -1868,6 +1904,7 @@ int main(int argc, char **argv)
 
                         AppState *app = &tabs[at].app;
                         UIListState *s = &app->list;
+                        s->external_drag = any_drag;
                         int vw = view.w;
                         int vh = view.h;
                         int list_h = vh - TAB_BAR_H;
@@ -1900,9 +1937,6 @@ int main(int argc, char **argv)
 
                         app_render_ui(app, &params, active ? key : 0);
 
-                        if (active)
-                                app_process_drops(app);
-
                         if (app->quit)
                         {
                                 quit = true;
@@ -1912,10 +1946,19 @@ int main(int argc, char **argv)
 
                 ui_set_view(NULL);
                 ui_suppress_mouse(false);
+
+                for (int i = 0; i < MAX_TABS; i++)
+                {
+                        if (tabs[i].in_use)
+                                app_process_drops(&tabs[i].app);
+                }
+
                 UITab ui_tabs[MAX_TABS] = {0};
                 char titles[MAX_TABS][PATH_MAX + 100];
-                for (int i = 0; i < MAX_TABS; i++) {
-                        if (tabs[i].in_use) {
+                for (int i = 0; i < MAX_TABS; i++)
+                {
+                        if (tabs[i].in_use)
+                        {
                                 if (tabs[i].app.git_branch[0])
                                         snprintf(titles[i], sizeof(titles[i]), "%s  [git: %s] ", tabs[i].app.cwd, tabs[i].app.git_branch);
                                 else

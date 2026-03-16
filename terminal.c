@@ -88,7 +88,7 @@ typedef struct
         float carry_x, carry_y, pickup_anim, drop_anim, fly_anim;
         int fly_origin_x, fly_origin_y, drop_dst_x, drop_dst_y;
 
-        bool fly_is_pickup, drop_to_target, carrying;
+        bool fly_is_pickup, drop_to_target, carrying, external_drag;
 } UIListState;
 
 typedef struct
@@ -329,10 +329,10 @@ UIRect ui_list_item_rect(const UIListState *s, int index)
         int cols = ui_list_cols(s);
         int c_w = (s->mode == UI_MODE_LIST) ? s->p.w - 1 : s->p.cell_w;
         int c_h = (s->mode == UI_MODE_LIST) ? 1 : s->p.cell_h;
-        
+
         int col_idx = index % cols;
         int row_idx = index / cols;
-        
+
         int x_pos = s->p.x;
         if (s->mode != UI_MODE_LIST)
         {
@@ -820,13 +820,17 @@ void ui_suppress_mouse(bool suppress) { mouse_suppressed = suppress; }
 void ui_rect(int x, int y, int w, int h, Color bg);
 Mouse ui_get_mouse(void)
 {
+        Mouse m = term_mouse;
         if (mouse_suppressed)
         {
-                Mouse z;
-                memset(&z, 0, sizeof(z));
-                return z;
+                m.left = false;
+                m.right = false;
+                m.clicked = false;
+                m.right_clicked = false;
+                m.wheel = 0;
+                m.has_sub = false;
         }
-        Mouse m = term_mouse;
+
         if (active_view)
         {
                 m.x -= active_view->x;
@@ -911,14 +915,15 @@ UITabBarResult ui_tab_bar(int w, const UITab *tabs, int count, bool show_add, bo
 {
         UITabBarResult res = {.clicked_tab = -1, .close_tab = -1, .add_clicked = false};
         Color bar_bg = (Color){0, 0, 0};
-        
+
         Color active_bg = is_active_pane ? (Color){255, 255, 255} : (Color){150, 150, 150};
         Color active_fg = (Color){0, 0, 0};
-        
-        if (is_active_pane && switch_flash > 0.0f) {
-            float t = switch_flash;
-            active_bg = (Color){255 * (1-t), 255 * (1-t), 255 * (1-t)};
-            active_fg = (Color){255 * t, 255 * t, 255 * t};
+
+        if (is_active_pane && switch_flash > 0.0f)
+        {
+                float t = switch_flash;
+                active_bg = (Color){255 * (1 - t), 255 * (1 - t), 255 * (1 - t)};
+                active_fg = (Color){255 * t, 255 * t, 255 * t};
         }
 
         Color inactive_bg = is_active_pane ? (Color){150, 150, 150} : (Color){80, 80, 80};
@@ -1192,7 +1197,7 @@ static void ui_dock_collect_leaves(const UIDockState *dock, int node_idx, int *o
         ui_dock_collect_leaves(dock, node->second, out, count, max_count);
 }
 
-static int ui_dock_leaf_at_point(const UIDockState *dock, int node_idx, int x, int y)
+int ui_dock_leaf_at_point(const UIDockState *dock, int node_idx, int x, int y)
 {
         if (!dock || node_idx < 0 || node_idx >= UI_DOCK_MAX_NODES)
                 return -1;
@@ -1220,8 +1225,9 @@ static void ui_dock_layout_node(UIDockState *dock, int node_idx, View view)
                 return;
 
         float min_f = 2.0f / (float)(view.w > 0 ? view.w : 1);
-        if (min_f > 0.4f) min_f = 0.4f;
-        
+        if (min_f > 0.4f)
+                min_f = 0.4f;
+
         UISplitterLayout split = ui_splitter_h(&node->split_frac, &node->dragging_splitter, view.x, view.y, view.w, view.h, true, min_f, 1.0f - min_f);
         ui_dock_layout_node(dock, node->first, split.first);
         ui_dock_layout_node(dock, node->second, split.second);
@@ -1418,7 +1424,7 @@ void ui_dock_begin_frame(UIDockState *dock, int x, int y, int w, int h)
         last_mx = term_mouse.x;
         last_my = term_mouse.y;
 
-        if (term_mouse.clicked || term_mouse.wheel != 0)
+        if (term_mouse.clicked || term_mouse.right_clicked || term_mouse.wheel != 0)
         {
                 int leaf = ui_dock_leaf_at_point(dock, dock->root, term_mouse.x, term_mouse.y);
                 if (leaf >= 0 && leaf != dock->active_leaf)
@@ -1466,18 +1472,18 @@ void ui_dock_draw(UIDockState *dock, const UITab *tabs, int tab_count, Color bar
                 return;
         (void)tab_count;
 
-        if (dock->last_active_leaf != dock->active_leaf) {
+        if (dock->last_active_leaf != dock->active_leaf)
+        {
                 dock->switch_flash = 1.0f;
                 dock->last_active_leaf = dock->active_leaf;
-        } else if (dock->switch_flash > 0.0f) {
+        }
+        else if (dock->switch_flash > 0.0f)
+        {
                 extern float term_dt_scale;
                 dock->switch_flash -= 0.1f * term_dt_scale;
                 if (dock->switch_flash < 0.0f)
                         dock->switch_flash = 0.0f;
         }
-
-        dock->close_request_tab = -1;
-        dock->add_request_leaf = -1;
 
         int leaves[UI_DOCK_MAX_NODES];
         int leaf_count = 0;
@@ -1517,7 +1523,7 @@ void ui_dock_draw(UIDockState *dock, const UITab *tabs, int tab_count, Color bar
                                 dock->add_request_leaf = leaf_idx;
 
                         Color corner_bg = (Color){255, 255, 255};
-                        
+
                         ui_text(leaf->view.w - 1, 0, " ", corner_bg, corner_bg, false, false);
                         ui_text(0, leaf->view.h - 1, " ", corner_bg, corner_bg, false, false);
                         ui_text(leaf->view.w - 1, leaf->view.h - 1, " ", corner_bg, corner_bg, false, false);
@@ -1703,7 +1709,7 @@ void ui_end(void)
                         *lc = *c;
                 }
         }
-        
+
         if (strcmp(current_cursor, next_cursor) != 0)
         {
                 current_cursor = next_cursor;
@@ -2056,7 +2062,7 @@ bool ui_list_do_item(UIListState *s, int index, UIItemResult *res)
 
         res->is_selected = s->selections[index] || s->active_box_selections[index];
         res->is_ghost = (s->is_dragging && s->drag_idx == index) || (s->is_kb_dragging && s->kb_drag_idx == index);
-        res->is_drop_target = (s->is_dragging && res->hovered && index != s->drag_idx) || (s->is_kb_dragging && s->selected_idx == index && index != s->kb_drag_idx);
+        res->is_drop_target = ((s->is_dragging || s->external_drag) && res->hovered && index != s->drag_idx) || (s->is_kb_dragging && s->selected_idx == index && index != s->kb_drag_idx);
 
         if (res->is_drop_target)
                 s->drop_target_idx = index;
@@ -2137,7 +2143,7 @@ void ui_list_end(UIListState *s)
         if (max_scroll > 0)
         {
                 bool hover = (!s->dragging_scroll && ui_get_mouse().x == s->p.x + s->p.w - 1 && ui_get_mouse().y >= s->p.y && ui_get_mouse().y < s->p.y + s->p.h);
-                
+
                 int thumb_h_half = (s->p.h * 2) * s->p.h / (rows * c_h);
                 if (thumb_h_half < 2)
                         thumb_h_half = 2;
