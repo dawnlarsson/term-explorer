@@ -4,7 +4,7 @@
 #include <limits.h>
 #include <ctype.h>
 
-Color clr_bg, clr_bar = {170, 170, 170}, clr_text = {255, 255, 255}, clr_folder = {255, 255, 85}, clr_hover = {170, 170, 170}, clr_sel_bg = {40, 70, 120};
+Color clr_bg = {-1, -1, -1}, clr_bar = {170, 170, 170}, clr_text = {255, 255, 255}, clr_folder = {255, 255, 85}, clr_hover = {170, 170, 170}, clr_sel_bg = {40, 70, 120};
 
 typedef struct AppState AppState;
 
@@ -484,7 +484,7 @@ void draw_item_grid(AppState *app, FileEntry *e, int x, int y, int w, int h, boo
         const char *icon_exec[] = {"  ┌──┐_ ", "  │░░└─│", "  │░░░░│", "  └────┘"};
         const char **icon = e->is_dir ? icon_dir : (e->is_exec ? icon_exec : icon_file);
 
-        int y_off = (is_hover && term_mouse.left && !app->list.is_dragging) ? 1 : 0;
+        int y_off = (is_hover && ui_get_mouse().left && !app->list.is_dragging) ? 1 : 0;
         for (int j = 0; j < 4; j++)
                 ui_text(x + 2, y + j + y_off, icon[j], icon_fg, item_bg, false, false);
         if (ext[1] != ' ' && !e->is_dir)
@@ -637,13 +637,18 @@ void app_load_dir(AppState *app, const char *path)
 {
         bool dir_changed = (strcmp(path, ".") != 0);
 
-        DIR *d = opendir(path) orelse opendir(".");
+        char prev_cwd[PATH_MAX];
+        getcwd(prev_cwd, sizeof(prev_cwd)) orelse return;
+
+        (chdir(path) == 0) orelse return;
+        defer chdir(prev_cwd);
+
+        DIR *d = opendir(".");
         d orelse return;
         defer closedir(d);
-        (chdir(path) == 0) orelse return;
         getcwd(app->cwd, sizeof(app->cwd)) orelse return;
 
-        char sel[256];
+        char sel[256] = "";
         if (app->count > 0 && app->list.selected_idx >= 0)
                 strcpy(sel, app->entries[app->list.selected_idx].name);
 
@@ -665,6 +670,21 @@ void app_load_dir(AppState *app, const char *path)
         UIListMode m = app->list.mode;
         ui_list_reset(&app->list);
         app->list.mode = m;
+        if (app->list.selections && app->list.selections_cap > 0)
+                memset(app->list.selections, 0, app->list.selections_cap * sizeof(bool));
+        if (app->list.active_box_selections && app->list.selections_cap > 0)
+                memset(app->list.active_box_selections, 0, app->list.selections_cap * sizeof(bool));
+        if (dir_changed)
+        {
+                app->list.drop_anim = 0.0f;
+                app->list.fly_anim = 0.0f;
+                app->list.pickup_anim = 0.0f;
+                app->list.is_dragging = false;
+                app->list.is_box_selecting = false;
+                app->list.carrying = false;
+                app->drop_count = 0;
+        }
+        app->last_hovered_idx = -1;
         app->count = 0;
 
         while (1)
@@ -694,7 +714,7 @@ void app_load_dir(AppState *app, const char *path)
         }
         qsort(app->entries, app->count, sizeof(FileEntry), cmp_entries);
 
-        if (saved_sels)
+        if (!dir_changed && saved_sels)
         {
                 for (int i = 0; i < app->count; i++)
                 {
@@ -707,18 +727,19 @@ void app_load_dir(AppState *app, const char *path)
                                 }
                         }
                 }
-                free(saved_sels);
         }
+        if (saved_sels)
+                free(saved_sels);
 
-        if (app->list.drop_anim > 0.0f)
+        if (!dir_changed && app->list.drop_anim > 0.0f)
         {
                 for (int i = 0; i < app->count; i++)
                 {
                         raw char p[PATH_MAX];
                         snprintf(p, PATH_MAX, "%s/%s", app->cwd, app->entries[i].name);
-                        for (int d = 0; d < app->drop_count; d++)
+                        for (int di = 0; di < app->drop_count; di++)
                         {
-                                if (!strcmp(p, app->drop_paths[d]))
+                                if (!strcmp(p, app->drop_paths[di]))
                                 {
                                         app->list.selections[i] = true;
                                         app->list.selected_idx = i;
@@ -1047,8 +1068,26 @@ void handle_input(AppState *app, int *key, const UIListParams *params)
 
         if (*key == KEY_ESC)
         {
-                s->carrying = false;
-                ui_list_clear_selections(s);
+                bool has_selection = false;
+                for (int i = 0; i < app->count; i++)
+                        if (s->selections[i])
+                        {
+                                has_selection = true;
+                                break;
+                        }
+
+                if (s->carrying || has_selection || global_ctx.active)
+                {
+                        s->carrying = false;
+                        ui_list_clear_selections(s);
+                        global_ctx.active = false;
+                        global_ctx.w = 0;
+                }
+                else
+                {
+                        app->quit = true;
+                }
+                *key = 0;
         }
 
         if (*key == KEY_ENTER && app->count > 0 && s->selected_idx >= 0 && app->entries[s->selected_idx].is_dir)
@@ -1402,17 +1441,18 @@ void app_render_ui(AppState *app, UIListParams *params, int key)
         if (cached_items)
                 free(cached_items);
 
-        ui_rect(0, 0, term_width, params->y, clr_bg);
-        ui_rect(0, 0, term_width, 1, clr_bar);
+        ui_rect(0, 1, params->w, params->y - 1, clr_bg);
+        ui_rect(0, 1, params->w, 1, clr_bar);
         raw char header[PATH_MAX + 100];
         if (app->git_branch[0])
                 snprintf(header, sizeof(header), "%s  [git: %s] ", app->cwd, app->git_branch);
         else
                 snprintf(header, sizeof(header), "%s ", app->cwd);
-        ui_text(1, 0, header, (Color){0}, clr_bar, false, false);
+        ui_text(1, 1, header, (Color){0}, clr_bar, false, false);
 
-        ui_rect(0, term_height - 1, term_width, 1, clr_bar);
-        ui_text(1, term_height - 1, s->carrying ? " Arrows: Navigate | Enter: Drop | 'Tab': Drop Here | Esc: Cancel " : " 1: View | Space: Sel | Tab: Move | Ctrl+C/V/D: Copy/Paste/Dup | Del/Ctrl+BS: Trash ", (Color){0}, clr_bar, false, false);
+        int footer_y = params->y + params->h;
+        ui_rect(0, footer_y, params->w, 1, clr_bar);
+        ui_text(1, footer_y, s->carrying ? " Arrows | Enter: Drop | Esc: Cancel | Q: Quit " : " 1: View | Space: Sel | Tab: Move | Esc/Q: Quit ", (Color){0}, clr_bar, false, false);
 
         const char *menu_options[] = {"Open", "Rename", "Delete", "Cancel"};
         int selected_action = -1;
@@ -1454,86 +1494,206 @@ void app_render_ui(AppState *app, UIListParams *params, int key)
         }
 }
 
+#define MAX_TABS 8
+
+typedef struct
+{
+        AppState app;
+        bool in_use;
+} AppTab;
+
+AppTab tabs[MAX_TABS];
+UIDockState dock;
+int tab_count = 0;
+
+const char *tab_title_from_cwd(const char *cwd)
+{
+        const char *base = strrchr(cwd, '/');
+        if (!base)
+                return cwd;
+        if (base[1] == '\0')
+                return "/";
+        return base + 1;
+}
+
+int add_tab(const char *dir)
+{
+        for (int i = 0; i < MAX_TABS; i++)
+        {
+                if (!tabs[i].in_use)
+                {
+                        memset(&tabs[i], 0, sizeof(AppTab));
+                        tabs[i].in_use = true;
+                        tabs[i].app.last_hovered_idx = -1;
+                        snprintf(tabs[i].app.trash_dir, PATH_MAX, "/tmp/prism_trash_%d_%d", getpid(), i);
+                        mkdir(tabs[i].app.trash_dir, 0777);
+                        app_load_dir(&tabs[i].app, dir);
+                        if (i >= tab_count)
+                                tab_count = i + 1;
+                        return i;
+                }
+        }
+        return -1;
+}
+
+void close_tab(int t)
+{
+        if (t < 0 || !tabs[t].in_use)
+                return;
+        rm_rf(tabs[t].app.trash_dir);
+        free(tabs[t].app.entries);
+        free(tabs[t].app.carried);
+        free(tabs[t].app.drop_paths);
+        free(tabs[t].app.pop_paths);
+        free(tabs[t].app.clipboard);
+        free(tabs[t].app.list.selections);
+        free(tabs[t].app.list.active_box_selections);
+        tabs[t].in_use = false;
+        ui_dock_remove_tab(&dock, t);
+}
+
 int main(void)
 {
         term_init() orelse return 1;
         defer term_restore();
         defer ui_action_clear();
 
-        AppState app;
-        memset(&app, 0, sizeof(AppState));
-        app.last_hovered_idx = -1;
-        defer free(app.entries);
-        defer free(app.carried);
-        defer free(app.drop_paths);
-        defer free(app.pop_paths);
-        defer free(app.clipboard);
+        memset(tabs, 0, sizeof(tabs));
+        ui_dock_init(&dock);
 
-        snprintf(app.trash_dir, PATH_MAX, "/tmp/prism_trash_%d", getpid());
-        mkdir(app.trash_dir, 0777);
-        defer rm_rf(app.trash_dir);
+        int t0 = add_tab(".");
+        int t1 = add_tab(".");
+        ui_dock_add_tab_to_leaf(&dock, 0, t0);
+        int second_leaf = ui_dock_split_leaf(&dock, 0, false);
+        if (second_leaf >= 0)
+                ui_dock_add_tab_to_leaf(&dock, second_leaf, t1);
+        else
+                ui_dock_add_tab_to_leaf(&dock, 0, t1);
 
-        app_load_dir(&app, ".");
-
-        bool first_frame = true, was_carrying, was_dragging;
-
-        while (!app.quit)
+        defer
         {
-                UIListState *s = &app.list;
-                int timeout = (app.next_dir[0] || ui_list_is_animating(s) || app.pop_anim > 0.0f || term_particle_count > 0) ? term_anim_timeout : 1000;
+                for (int i = 0; i < tab_count; i++)
+                        if (tabs[i].in_use)
+                                close_tab(i);
+        }
 
+        bool first_frame = true;
+        bool quit = false;
+
+        while (!quit)
+        {
+                bool animating = false;
+                for (int i = 0; i < tab_count; i++)
+                {
+                        if (!tabs[i].in_use)
+                                continue;
+                        AppState *a = &tabs[i].app;
+                        if (a->next_dir[0] || ui_list_is_animating(&a->list) || a->pop_anim > 0.0f)
+                                animating = true;
+                }
+                int timeout = (animating || term_particle_count > 0 || ui_dock_is_animating(&dock)) ? term_anim_timeout : 1000;
                 int key = term_poll(first_frame ? 0 : timeout);
-                UIListParams params = {0, 1, term_width, term_height - 2 > 0 ? term_height - 2 : 1, app.count, 14, 7, clr_bg, {30, 30, 30}, clr_bar};
 
-                handle_input(&app, &key, &params);
-
-                if (app.next_dir[0] && (s->drop_anim <= 0.01f || !s->drop_to_target) && (!app.pop_is_out || app.pop_anim <= 0.01f))
-                {
-                        app_load_dir(&app, app.next_dir);
-                        app.next_dir[0] = '\0';
-                        first_frame = true;
-                        continue;
-                }
-
-                if (app.pop_anim > 0.0f)
-                {
-                        app.pop_anim -= ANIM_SPEED_POP * term_dt_scale;
-                        if (app.pop_anim < 0.0f)
-                                app.pop_anim = 0.0f;
-                }
+                ui_set_view(NULL);
+                ui_suppress_mouse(false);
 
                 ui_begin();
                 defer ui_end();
                 ui_clear(clr_bg);
+                ui_dock_begin_frame(&dock, 0, 0, term_width, term_height);
 
-                if (s->carrying && !was_carrying)
-                {
-                        int c_idx = s->selected_idx != -1 ? s->selected_idx : (app.last_hovered_idx != -1 ? app.last_hovered_idx : 0);
-                        s->carry_x = ui_list_item_rect(s, c_idx).x;
-                        s->carry_y = ui_list_item_rect(s, c_idx).y;
-                }
+#define TAB_BAR_H 1
 
-                if (s->is_dragging && !was_dragging)
+                int leaf_count = ui_dock_leaf_count(&dock);
+                for (int leaf_ord = 0; leaf_ord < leaf_count; leaf_ord++)
                 {
-                        bool drag_multi = s->drag_idx >= 0 && s->selections[s->drag_idx];
-                        for (int i = 0; i < app.count; i++)
+                        int leaf = ui_dock_leaf_nth(&dock, leaf_ord);
+                        View view;
+                        int at = -1;
+                        bool active = false;
+                        if (!ui_dock_leaf_get(&dock, leaf, &view, &at, &active))
+                                continue;
+                        if (at < 0 || !tabs[at].in_use)
+                                continue;
+
+                        AppState *app = &tabs[at].app;
+                        UIListState *s = &app->list;
+                        int vw = view.w;
+                        int vh = view.h;
+                        int list_h = vh - TAB_BAR_H - 1;
+                        if (list_h < 1)
+                                list_h = 1;
+                        UIListParams params = {0, TAB_BAR_H + 1, vw, list_h - 1 > 0 ? list_h - 1 : 1, app->count, 14, 7, clr_bg, {30, 30, 30}, clr_bar};
+
+                        ui_set_view(&view);
+                        ui_suppress_mouse(!active);
+
+                        if (active)
+                                handle_input(app, &key, &params);
+
+                        if (app->next_dir[0] && (s->drop_anim <= 0.01f || !s->drop_to_target) && (!app->pop_is_out || app->pop_anim <= 0.01f))
                         {
-                                if ((drag_multi && s->selections[i]) || (!drag_multi && i == s->drag_idx))
-                                {
-                                        if (strcmp(app.entries[i].name, "..") != 0)
-                                        {
-                                                UIRect br = ui_list_item_rect(s, i);
-                                                ui_burst_particles(br.x + br.w / 2, br.y + br.h / 2, drag_multi ? 5 : 15, clr_text);
-                                        }
-                                }
+                                app_load_dir(app, app->next_dir);
+                                app->next_dir[0] = '\0';
+                                first_frame = true;
+                                key = 0;
+                                s = &app->list;
+                                params.item_count = app->count;
+                        }
+
+                        if (app->pop_anim > 0.0f)
+                        {
+                                app->pop_anim -= ANIM_SPEED_POP * term_dt_scale;
+                                if (app->pop_anim < 0.0f)
+                                        app->pop_anim = 0.0f;
+                        }
+
+                        app_render_ui(app, &params, active ? key : 0);
+
+                        if (active)
+                                app_process_drops(app);
+
+                        if (app->quit)
+                        {
+                                quit = true;
+                                break;
                         }
                 }
 
-                app_render_ui(&app, &params, key);
-                app_process_drops(&app);
+                ui_set_view(NULL);
+                ui_suppress_mouse(false);
+                UITab ui_tabs[MAX_TABS] = {0};
+                for (int i = 0; i < MAX_TABS; i++)
+                        if (tabs[i].in_use)
+                                ui_tabs[i] = (UITab){
+                                    .label = tab_title_from_cwd(tabs[i].app.cwd),
+                                    .active = false,
+                                    .closable = true,
+                                };
+                ui_dock_draw(&dock, ui_tabs, MAX_TABS, clr_bar, clr_bg, clr_bar, clr_bg);
 
-                was_carrying = s->carrying;
-                was_dragging = s->is_dragging;
+                int close_id = ui_dock_take_close_request(&dock);
+                if (close_id >= 0)
+                {
+                        close_tab(close_id);
+                        first_frame = true;
+                }
+
+                int add_leaf = ui_dock_take_add_request_leaf(&dock);
+                if (add_leaf >= 0)
+                {
+                        View leaf_view;
+                        int src_tab = -1;
+                        bool active = false;
+                        const char *dir = ".";
+                        if (ui_dock_leaf_get(&dock, add_leaf, &leaf_view, &src_tab, &active) && src_tab >= 0 && tabs[src_tab].in_use)
+                                dir = tabs[src_tab].app.cwd;
+                        int nt = add_tab(dir);
+                        if (nt >= 0)
+                                ui_dock_add_tab_to_leaf(&dock, add_leaf, nt);
+                        first_frame = true;
+                }
+
                 first_frame = false;
         }
         return 0;

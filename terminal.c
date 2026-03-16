@@ -53,6 +53,11 @@ typedef struct
 } Cell;
 typedef struct
 {
+        int x, y, w, h;
+} View;
+
+typedef struct
+{
         int x, y, sub_y, wheel;
         bool has_sub, left, right, clicked, right_clicked, hide_cursor, ctrl;
 } Mouse;
@@ -103,6 +108,73 @@ typedef struct
         int x, y, w, h;
 } UIRect;
 
+typedef struct
+{
+        View first, second;
+        int divider_x;
+} UISplitterLayout;
+
+#define UI_DOCK_MAX_TABS 64
+#define UI_DOCK_MAX_NODES 32
+
+typedef enum
+{
+        UI_DOCK_NODE_LEAF,
+        UI_DOCK_NODE_SPLIT_H,
+} UIDockNodeKind;
+
+typedef enum
+{
+        UI_DOCK_DROP_NONE,
+        UI_DOCK_DROP_MERGE,
+        UI_DOCK_DROP_SPLIT_LEFT,
+        UI_DOCK_DROP_SPLIT_RIGHT,
+} UIDockDropKind;
+
+typedef struct
+{
+        bool in_use;
+        UIDockNodeKind kind;
+        int parent;
+        View view;
+        int tabs[UI_DOCK_MAX_TABS];
+        int tab_count;
+        int active_tab;
+        int first, second;
+        float split_frac;
+        bool dragging_splitter;
+} UIDockNode;
+
+typedef struct
+{
+        UIDockNode nodes[UI_DOCK_MAX_NODES];
+        int root;
+        View bounds;
+        int active_leaf;
+        int dragging_tab;
+        int drag_src_leaf;
+        int drag_start_x;
+        int pending_tab;
+        int pending_leaf;
+        int pending_start_x;
+        int pending_frames;
+        int close_request_tab;
+        int add_request_leaf;
+} UIDockState;
+
+typedef struct
+{
+        const char *label;
+        bool active, closable;
+} UITab;
+
+typedef struct
+{
+        int clicked_tab;
+        int close_tab;
+        bool add_clicked;
+} UITabBarResult;
+
 typedef void (*UIActionFn)(void *payload);
 
 typedef struct
@@ -127,6 +199,8 @@ float term_dt_scale = 1.0f;
 
 static struct termios orig_termios;
 static volatile int resize_flag = 1;
+static View *active_view = NULL;
+static bool mouse_suppressed = false;
 static Cell *canvas, *last_canvas;
 static int fd_m = -1, fd_touch = -1, raw_mx, raw_my, color_mode;
 static bool is_evdev;
@@ -152,12 +226,14 @@ void ui_spawn_particle(float x, float y, float vx, float vy, Color c, float life
 
 void ui_burst_particles(int cx, int cy, int count, Color c)
 {
+        int ox = active_view ? active_view->x : 0;
+        int oy = active_view ? active_view->y : 0;
         for (int i = 0; i < count; i++)
         {
                 float vx = ((rand() % 100) / 50.0f) - 1.0f;
                 float vy = ((rand() % 100) / 50.0f) - 2.0f;
 
-                ui_spawn_particle((float)cx, (float)(cy * 2 + 1), vx * 2.0f, vy * 1.5f, c, 10.0f + (rand() % 15));
+                ui_spawn_particle((float)(cx + ox), (float)((cy + oy) * 2 + 1), vx * 2.0f, vy * 1.5f, c, 10.0f + (rand() % 15));
         }
 }
 
@@ -170,13 +246,23 @@ void ui_scale_region(int x, int y, int w, int h, float scale, Color clear_bg)
         if (w * h > 2048)
                 return;
 
+        int ox = active_view ? active_view->x : 0;
+        int oy = active_view ? active_view->y : 0;
+        int clip_x0 = active_view ? active_view->x : 0;
+        int clip_y0 = active_view ? active_view->y : 0;
+        int clip_x1 = active_view ? active_view->x + active_view->w : term_width;
+        int clip_y1 = active_view ? active_view->y + active_view->h : term_height;
+
+        x += ox;
+        y += oy;
+
         raw Cell temp[2048];
         for (int r = 0; r < h; r++)
         {
                 for (int c = 0; c < w; c++)
                 {
                         int cx = x + c, cy = y + r;
-                        if (cx >= 0 && cx < term_width && cy >= 0 && cy < term_height)
+                        if (cx >= clip_x0 && cx < clip_x1 && cy >= clip_y0 && cy < clip_y1)
                                 temp[r * w + c] = canvas[cy * term_width + cx];
                         else
                                 temp[r * w + c] = (Cell){" ", clear_bg, clear_bg, false, false};
@@ -188,7 +274,7 @@ void ui_scale_region(int x, int y, int w, int h, float scale, Color clear_bg)
                 for (int c = 0; c < w; c++)
                 {
                         int cx = x + c, cy = y + r;
-                        if (cx >= 0 && cx < term_width && cy >= 0 && cy < term_height)
+                        if (cx >= clip_x0 && cx < clip_x1 && cy >= clip_y0 && cy < clip_y1)
                                 canvas[cy * term_width + cx] = (Cell){" ", clear_bg, clear_bg, false, false};
                 }
         }
@@ -212,19 +298,57 @@ void ui_scale_region(int x, int y, int w, int h, float scale, Color clear_bg)
                                 src_c = w - 1;
 
                         int cx = nx + c, cy = ny + r;
-                        if (cx >= 0 && cx < term_width && cy >= 0 && cy < term_height)
+                        if (cx >= clip_x0 && cx < clip_x1 && cy >= clip_y0 && cy < clip_y1)
                                 canvas[cy * term_width + cx] = temp[src_r * w + src_c];
                 }
         }
 }
 
+static bool ui_mouse_in_active_view(void)
+{
+        if (!active_view)
+                return true;
+        int x = term_mouse.x - active_view->x;
+        int y = term_mouse.y - active_view->y;
+        return x >= 0 && x < active_view->w && y >= 0 && y < active_view->h;
+}
+
+static int ui_list_cols(const UIListState *s)
+{
+        return (s->mode == UI_MODE_LIST) ? 1 : ((s->p.w - 1) / s->p.cell_w > 0 ? (s->p.w - 1) / s->p.cell_w : 1);
+}
+
+static int ui_list_grid_gap_x(const UIListState *s)
+{
+        if (s->mode == UI_MODE_LIST)
+                return 0;
+        int cols = ui_list_cols(s);
+        int extra = (s->p.w - 1) - cols * s->p.cell_w;
+        if (extra < 0)
+                extra = 0;
+        return cols > 1 ? extra / (cols + 1) : 0;
+}
+
+static int ui_list_grid_offset_x(const UIListState *s)
+{
+        if (s->mode == UI_MODE_LIST)
+                return 0;
+        int cols = ui_list_cols(s);
+        int extra = (s->p.w - 1) - cols * s->p.cell_w;
+        if (extra < 0)
+                extra = 0;
+        return cols > 1 ? extra / (cols + 1) : extra / 2;
+}
+
 UIRect ui_list_item_rect(const UIListState *s, int index)
 {
-        int cols = (s->mode == UI_MODE_LIST) ? 1 : ((s->p.w - 1) / s->p.cell_w > 0 ? (s->p.w - 1) / s->p.cell_w : 1);
+        int cols = ui_list_cols(s);
         int c_w = (s->mode == UI_MODE_LIST) ? s->p.w - 1 : s->p.cell_w;
         int c_h = (s->mode == UI_MODE_LIST) ? 1 : s->p.cell_h;
+        int gap_x = ui_list_grid_gap_x(s);
+        int off_x = ui_list_grid_offset_x(s);
         return (UIRect){
-            .x = s->p.x + (index % cols) * c_w,
+            .x = s->mode == UI_MODE_LIST ? s->p.x : s->p.x + off_x + (index % cols) * (c_w + gap_x),
             .y = s->p.y + (index / cols * c_h) - (int)(s->current_scroll + 0.5f),
             .w = c_w,
             .h = c_h};
@@ -332,8 +456,7 @@ static int rgb_to_ansi16(Color c, bool is_bg)
         return (is_bg ? (bright ? 100 : 40) : (bright ? 90 : 30)) + (r | (g << 1) | (b << 2));
 }
 
-#define SET_COL(fg, c) (color_mode == 2 ? printf("\033[%d;2;%d;%d;%dm", fg ? 38 : 48, c.r, c.g, c.b) : color_mode == 1 ? printf("\033[%d;5;%dm", fg ? 38 : 48, rgb256(c)) \
-                                                                                                                       : printf("\033[%dm", rgb_to_ansi16(c, !fg)))
+#define SET_COL(fg, c) (c.r == -1 ? printf("[%d9m", fg ? 3 : 4) : (color_mode == 2 ? printf("[%d;2;%d;%d;%dm", fg ? 38 : 48, c.r, c.g, c.b) : printf("[%d;5;%dm", fg ? 38 : 48, 16 + (36 * (c.r / 51)) + (6 * (c.g / 51)) + (c.b / 51))))
 
 void term_restore(void)
 {
@@ -693,21 +816,51 @@ void ui_begin(void)
         }
 }
 
+void ui_set_view(View *v) { active_view = v; }
+void ui_suppress_mouse(bool suppress) { mouse_suppressed = suppress; }
+void ui_rect(int x, int y, int w, int h, Color bg);
+Mouse ui_get_mouse(void)
+{
+        if (mouse_suppressed)
+        {
+                Mouse z;
+                memset(&z, 0, sizeof(z));
+                return z;
+        }
+        Mouse m = term_mouse;
+        if (active_view)
+        {
+                m.x -= active_view->x;
+                m.y -= active_view->y;
+        }
+        return m;
+}
+
 void ui_clear(Color bg)
 {
+        if (active_view)
+        {
+                ui_rect(0, 0, active_view->w, active_view->h, bg);
+                return;
+        }
         for (int i = 0; i < term_width * term_height; i++)
                 canvas[i] = (Cell){" ", bg, bg, false, false};
 }
 
 void ui_rect(int x, int y, int w, int h, Color bg)
 {
+        if (active_view)
+        {
+                x += active_view->x;
+                y += active_view->y;
+        }
         for (int r = y; r < y + h; r++)
         {
-                if (r < 0 || r >= term_height)
+                if (r < 0 || r >= term_height || (active_view && (r < active_view->y || r >= active_view->y + active_view->h)))
                         continue;
                 for (int c = x; c < x + w; c++)
                 {
-                        if (c < 0 || c >= term_width)
+                        if (c < 0 || c >= term_width || (active_view && (c < active_view->x || c >= active_view->x + active_view->w)))
                                 continue;
                         canvas[r * term_width + c] = (Cell){" ", bg, bg, false, false};
                 }
@@ -716,15 +869,22 @@ void ui_rect(int x, int y, int w, int h, Color bg)
 
 void ui_text(int x, int y, const char *txt, Color fg, Color bg, bool bold, bool invert)
 {
+        if (active_view)
+        {
+                x += active_view->x;
+                y += active_view->y;
+        }
         if (y < 0 || y >= term_height)
                 return;
-        for (int i = 0, sx = x; txt[i] && sx < term_width; sx++)
+        int x_min = active_view ? active_view->x : 0;
+        int x_max = active_view ? active_view->x + active_view->w : term_width;
+        for (int i = 0, sx = x; txt[i] && sx < x_max; sx++)
         {
                 int len = ((txt[i] & 0xE0) == 0xC0) ? 2 : ((txt[i] & 0xF0) == 0xE0) ? 3
                                                       : ((txt[i] & 0xF8) == 0xF0)   ? 4
                                                                                     : 1;
                 int actual_len = 0;
-                if (sx >= 0)
+                if (sx >= x_min && sx < term_width)
                 {
                         Cell *c = &canvas[y * term_width + sx];
                         *c = (Cell){"", fg, bg, bold, invert};
@@ -746,6 +906,661 @@ void ui_text_centered(int x, int y, int w, const char *txt, Color fg, Color bg, 
                         len++;
         int px = x + (w - len) / 2;
         ui_text(px < x ? x : px, y, txt, fg, bg, bold, invert);
+}
+
+UITabBarResult ui_tab_bar(int w, const UITab *tabs, int count, bool show_add, Color bar_bg, Color active_bg)
+{
+        UITabBarResult res = {.clicked_tab = -1, .close_tab = -1, .add_clicked = false};
+        Color inactive_bg = (Color){60, 60, 60};
+        Color active_fg = (Color){255, 255, 255};
+        Color inactive_fg = (Color){140, 140, 140};
+        Color close_fg = (Color){180, 80, 80};
+        Color add_fg = (Color){100, 200, 100};
+
+        ui_rect(0, 0, w, 1, bar_bg);
+
+        Mouse m = ui_get_mouse();
+        int tx = 0;
+        for (int i = 0; i < count; i++)
+        {
+                const char *label = tabs[i].label ? tabs[i].label : "";
+                int name_len = 0;
+                for (const char *c = label; *c; c++)
+                        name_len++;
+                int tab_w = name_len + 4;
+                if (tab_w < 8)
+                        tab_w = 8;
+                if (tx + tab_w > w)
+                        tab_w = w - tx;
+                if (tab_w <= 0)
+                        break;
+
+                Color tab_bg = tabs[i].active ? active_bg : inactive_bg;
+                Color tab_fg = tabs[i].active ? active_fg : inactive_fg;
+
+                ui_rect(tx, 0, tab_w, 1, tab_bg);
+                ui_text(tx + 1, 0, label, tab_fg, tab_bg, tabs[i].active, false);
+                if (tabs[i].closable)
+                        ui_text(tx + tab_w - 2, 0, "×", close_fg, tab_bg, false, false);
+
+                if (m.clicked && m.y == 0 && m.x >= tx && m.x < tx + tab_w)
+                {
+                        if (tabs[i].closable && m.x == tx + tab_w - 2)
+                                res.close_tab = i;
+                        else
+                                res.clicked_tab = i;
+                }
+
+                tx += tab_w + 1;
+        }
+
+        if (show_add && tx + 3 <= w)
+        {
+                ui_text(tx, 0, " + ", add_fg, bar_bg, false, false);
+                if (m.clicked && m.y == 0 && m.x >= tx && m.x < tx + 3)
+                        res.add_clicked = true;
+        }
+
+        return res;
+}
+
+bool ui_view_contains(const View *view, int x, int y)
+{
+        return view && x >= view->x && x < view->x + view->w && y >= view->y && y < view->y + view->h;
+}
+
+UISplitterLayout ui_splitter_h(float *frac, bool *dragging, int x, int y, int w, int h, bool split, float min_frac, float max_frac)
+{
+        UISplitterLayout layout = {
+            .first = {x, y, w, h},
+            .second = {x, y, 0, h},
+            .divider_x = x + w};
+
+        if (!split)
+                return layout;
+
+        int divider_x = x + (int)(w * *frac);
+        if (term_mouse.clicked && abs(term_mouse.x - divider_x) <= 1 && term_mouse.y >= y && term_mouse.y < y + h)
+                *dragging = true;
+        if (!term_mouse.left)
+                *dragging = false;
+        if (*dragging)
+        {
+                float f = (float)(term_mouse.x - x) / w;
+                if (f < min_frac)
+                        f = min_frac;
+                if (f > max_frac)
+                        f = max_frac;
+                *frac = f;
+                divider_x = x + (int)(w * *frac);
+        }
+
+        layout.first = (View){x, y, divider_x - x, h};
+        layout.second = (View){divider_x + 1, y, x + w - divider_x - 1, h};
+        layout.divider_x = divider_x;
+
+        return layout;
+}
+
+void ui_splitter_h_draw(const UISplitterLayout *layout, bool dragging, int y, int h, Color divider_fg, Color bg)
+{
+        if (!layout || layout->second.w <= 0)
+                return;
+        Color div = dragging ? (Color){255, 255, 255} : divider_fg;
+        for (int row = y; row < y + h; row++)
+                ui_text(layout->divider_x, row, "│", div, bg, false, false);
+}
+
+static void ui_dock_reset_node(UIDockNode *node)
+{
+        memset(node, 0, sizeof(*node));
+        node->in_use = true;
+        node->kind = UI_DOCK_NODE_LEAF;
+        node->parent = -1;
+        node->active_tab = -1;
+        node->first = -1;
+        node->second = -1;
+        node->split_frac = 0.5f;
+}
+
+static void ui_dock_release_node(UIDockNode *node)
+{
+        memset(node, 0, sizeof(*node));
+        node->parent = -1;
+        node->active_tab = -1;
+        node->first = -1;
+        node->second = -1;
+}
+
+static int ui_dock_alloc_node(UIDockState *dock)
+{
+        for (int i = 0; i < UI_DOCK_MAX_NODES; i++)
+                if (!dock->nodes[i].in_use)
+                {
+                        ui_dock_reset_node(&dock->nodes[i]);
+                        return i;
+                }
+        return -1;
+}
+
+static int ui_dock_leaf_first_valid_tab(const UIDockNode *leaf)
+{
+        return leaf->tab_count > 0 ? leaf->tabs[0] : -1;
+}
+
+static int ui_dock_leaf_find_tab(const UIDockNode *leaf, int tab_id)
+{
+        for (int i = 0; i < leaf->tab_count; i++)
+                if (leaf->tabs[i] == tab_id)
+                        return i;
+        return -1;
+}
+
+static bool ui_dock_is_leaf_node(const UIDockState *dock, int node_idx)
+{
+        return dock && node_idx >= 0 && node_idx < UI_DOCK_MAX_NODES && dock->nodes[node_idx].in_use && dock->nodes[node_idx].kind == UI_DOCK_NODE_LEAF;
+}
+
+static int ui_dock_first_leaf_from(const UIDockState *dock, int node_idx)
+{
+        if (!dock || node_idx < 0 || node_idx >= UI_DOCK_MAX_NODES)
+                return -1;
+        const UIDockNode *node = &dock->nodes[node_idx];
+        if (!node->in_use)
+                return -1;
+        if (node->kind == UI_DOCK_NODE_LEAF)
+                return node_idx;
+        int leaf = ui_dock_first_leaf_from(dock, node->first);
+        return leaf >= 0 ? leaf : ui_dock_first_leaf_from(dock, node->second);
+}
+
+static void ui_dock_replace_child(UIDockState *dock, int parent_idx, int old_child, int new_child)
+{
+        if (parent_idx < 0)
+        {
+                dock->root = new_child;
+                if (new_child >= 0)
+                        dock->nodes[new_child].parent = -1;
+                return;
+        }
+
+        UIDockNode *parent = &dock->nodes[parent_idx];
+        if (parent->first == old_child)
+                parent->first = new_child;
+        else if (parent->second == old_child)
+                parent->second = new_child;
+
+        if (new_child >= 0)
+                dock->nodes[new_child].parent = parent_idx;
+}
+
+static void ui_dock_collapse_empty_leaf(UIDockState *dock, int leaf_idx)
+{
+        if (!ui_dock_is_leaf_node(dock, leaf_idx))
+                return;
+
+        UIDockNode *leaf = &dock->nodes[leaf_idx];
+        if (leaf->tab_count > 0)
+                return;
+
+        int parent_idx = leaf->parent;
+        if (parent_idx < 0)
+        {
+                leaf->active_tab = -1;
+                dock->active_leaf = leaf_idx;
+                return;
+        }
+
+        UIDockNode *parent = &dock->nodes[parent_idx];
+        int sibling_idx = parent->first == leaf_idx ? parent->second : parent->first;
+        int grand_idx = parent->parent;
+
+        ui_dock_replace_child(dock, grand_idx, parent_idx, sibling_idx);
+        if (dock->active_leaf == leaf_idx)
+                dock->active_leaf = ui_dock_first_leaf_from(dock, sibling_idx);
+
+        ui_dock_release_node(leaf);
+        ui_dock_release_node(parent);
+}
+
+static bool ui_dock_remove_tab_from_leaf(UIDockState *dock, int leaf_idx, int tab_id)
+{
+        if (!ui_dock_is_leaf_node(dock, leaf_idx))
+                return false;
+
+        UIDockNode *leaf = &dock->nodes[leaf_idx];
+        int idx = ui_dock_leaf_find_tab(leaf, tab_id);
+        if (idx < 0)
+                return false;
+
+        memmove(&leaf->tabs[idx], &leaf->tabs[idx + 1], (leaf->tab_count - idx - 1) * sizeof(int));
+        leaf->tab_count--;
+        if (leaf->active_tab == tab_id)
+                leaf->active_tab = ui_dock_leaf_first_valid_tab(leaf);
+        if (leaf->tab_count == 0)
+                ui_dock_collapse_empty_leaf(dock, leaf_idx);
+        return true;
+}
+
+static void ui_dock_collect_leaves(const UIDockState *dock, int node_idx, int *out, int *count, int max_count)
+{
+        if (!dock || node_idx < 0 || node_idx >= UI_DOCK_MAX_NODES || *count >= max_count)
+                return;
+        const UIDockNode *node = &dock->nodes[node_idx];
+        if (!node->in_use)
+                return;
+        if (node->kind == UI_DOCK_NODE_LEAF)
+        {
+                out[(*count)++] = node_idx;
+                return;
+        }
+        ui_dock_collect_leaves(dock, node->first, out, count, max_count);
+        ui_dock_collect_leaves(dock, node->second, out, count, max_count);
+}
+
+static int ui_dock_leaf_at_point(const UIDockState *dock, int node_idx, int x, int y)
+{
+        if (!dock || node_idx < 0 || node_idx >= UI_DOCK_MAX_NODES)
+                return -1;
+
+        const UIDockNode *node = &dock->nodes[node_idx];
+        if (!node->in_use || !ui_view_contains(&node->view, x, y))
+                return -1;
+        if (node->kind == UI_DOCK_NODE_LEAF)
+                return node_idx;
+
+        int hit = ui_dock_leaf_at_point(dock, node->first, x, y);
+        return hit >= 0 ? hit : ui_dock_leaf_at_point(dock, node->second, x, y);
+}
+
+static void ui_dock_layout_node(UIDockState *dock, int node_idx, View view)
+{
+        if (!dock || node_idx < 0 || node_idx >= UI_DOCK_MAX_NODES)
+                return;
+
+        UIDockNode *node = &dock->nodes[node_idx];
+        if (!node->in_use)
+                return;
+        node->view = view;
+        if (node->kind == UI_DOCK_NODE_LEAF)
+                return;
+
+        UISplitterLayout split = ui_splitter_h(&node->split_frac, &node->dragging_splitter, view.x, view.y, view.w, view.h, true, 0.15f, 0.85f);
+        ui_dock_layout_node(dock, node->first, split.first);
+        ui_dock_layout_node(dock, node->second, split.second);
+}
+
+static void ui_dock_draw_splitters(const UIDockState *dock, int node_idx, Color divider_fg, Color bg)
+{
+        if (!dock || node_idx < 0 || node_idx >= UI_DOCK_MAX_NODES)
+                return;
+
+        const UIDockNode *node = &dock->nodes[node_idx];
+        if (!node->in_use || node->kind == UI_DOCK_NODE_LEAF)
+                return;
+
+        int divider_x = dock->nodes[node->second].view.x - 1;
+        UISplitterLayout layout = {
+            .first = dock->nodes[node->first].view,
+            .second = dock->nodes[node->second].view,
+            .divider_x = divider_x,
+        };
+        ui_splitter_h_draw(&layout, node->dragging_splitter, node->view.y, node->view.h, divider_fg, bg);
+        ui_dock_draw_splitters(dock, node->first, divider_fg, bg);
+        ui_dock_draw_splitters(dock, node->second, divider_fg, bg);
+}
+
+static UIDockDropKind ui_dock_drop_kind_for_leaf(const UIDockState *dock, int target_leaf, int src_leaf, int mouse_x)
+{
+        if (!ui_dock_is_leaf_node(dock, target_leaf))
+                return UI_DOCK_DROP_NONE;
+
+        const UIDockNode *leaf = &dock->nodes[target_leaf];
+        if (target_leaf == src_leaf && leaf->tab_count <= 1)
+                return UI_DOCK_DROP_NONE;
+
+        int left_edge = leaf->view.x + leaf->view.w / 3;
+        int right_edge = leaf->view.x + (leaf->view.w * 2) / 3;
+        if (mouse_x < left_edge)
+                return UI_DOCK_DROP_SPLIT_LEFT;
+        if (mouse_x >= right_edge)
+                return UI_DOCK_DROP_SPLIT_RIGHT;
+        return target_leaf != src_leaf ? UI_DOCK_DROP_MERGE : UI_DOCK_DROP_NONE;
+}
+
+static View ui_dock_preview_rect_for_drop(const UIDockState *dock, int target_leaf, UIDockDropKind kind)
+{
+        View empty = {0, 0, 0, 0};
+        if (!ui_dock_is_leaf_node(dock, target_leaf))
+                return empty;
+
+        View view = dock->nodes[target_leaf].view;
+        if (kind == UI_DOCK_DROP_MERGE)
+                return view;
+        if (kind == UI_DOCK_DROP_SPLIT_LEFT)
+                return (View){view.x, view.y, view.w / 2, view.h};
+        if (kind == UI_DOCK_DROP_SPLIT_RIGHT)
+                return (View){view.x + view.w / 2, view.y, view.w - view.w / 2, view.h};
+        return empty;
+}
+
+int ui_dock_leaf_count(const UIDockState *dock)
+{
+        int leaves[UI_DOCK_MAX_NODES];
+        int count = 0;
+        memset(leaves, 0, sizeof(leaves));
+        if (dock)
+                ui_dock_collect_leaves(dock, dock->root, leaves, &count, UI_DOCK_MAX_NODES);
+        return count;
+}
+
+int ui_dock_leaf_nth(const UIDockState *dock, int n)
+{
+        int leaves[UI_DOCK_MAX_NODES];
+        int count = 0;
+        memset(leaves, 0, sizeof(leaves));
+        if (!dock)
+                return -1;
+        ui_dock_collect_leaves(dock, dock->root, leaves, &count, UI_DOCK_MAX_NODES);
+        return n >= 0 && n < count ? leaves[n] : -1;
+}
+
+void ui_dock_init(UIDockState *dock)
+{
+        memset(dock, 0, sizeof(*dock));
+        dock->root = 0;
+        ui_dock_reset_node(&dock->nodes[0]);
+        dock->bounds = (View){0, 0, 0, 0};
+        dock->dragging_tab = -1;
+        dock->drag_src_leaf = -1;
+        dock->pending_tab = -1;
+        dock->pending_leaf = -1;
+        dock->close_request_tab = -1;
+        dock->add_request_leaf = -1;
+        dock->active_leaf = 0;
+}
+
+bool ui_dock_add_tab_to_leaf(UIDockState *dock, int leaf_idx, int tab_id)
+{
+        if (!ui_dock_is_leaf_node(dock, leaf_idx))
+                return false;
+        UIDockNode *leaf = &dock->nodes[leaf_idx];
+        if (leaf->tab_count >= UI_DOCK_MAX_TABS)
+                return false;
+        leaf->tabs[leaf->tab_count++] = tab_id;
+        leaf->active_tab = tab_id;
+        dock->active_leaf = leaf_idx;
+        return true;
+}
+
+int ui_dock_split_leaf(UIDockState *dock, int leaf_idx, bool new_leaf_before)
+{
+        if (!ui_dock_is_leaf_node(dock, leaf_idx))
+                return -1;
+
+        int new_leaf_idx = ui_dock_alloc_node(dock);
+        if (new_leaf_idx < 0)
+                return -1;
+        int parent_idx = ui_dock_alloc_node(dock);
+        if (parent_idx < 0)
+        {
+                ui_dock_release_node(&dock->nodes[new_leaf_idx]);
+                return -1;
+        }
+
+        UIDockNode *leaf = &dock->nodes[leaf_idx];
+        int old_parent = leaf->parent;
+
+        UIDockNode *parent = &dock->nodes[parent_idx];
+        parent->kind = UI_DOCK_NODE_SPLIT_H;
+        parent->parent = old_parent;
+        parent->view = leaf->view;
+        parent->split_frac = 0.5f;
+        parent->dragging_splitter = false;
+
+        dock->nodes[new_leaf_idx].parent = parent_idx;
+        leaf->parent = parent_idx;
+
+        if (new_leaf_before)
+        {
+                parent->first = new_leaf_idx;
+                parent->second = leaf_idx;
+        }
+        else
+        {
+                parent->first = leaf_idx;
+                parent->second = new_leaf_idx;
+        }
+
+        ui_dock_replace_child(dock, old_parent, leaf_idx, parent_idx);
+        return new_leaf_idx;
+}
+
+void ui_dock_remove_tab(UIDockState *dock, int tab_id)
+{
+        if (!dock)
+                return;
+
+        int leaves[UI_DOCK_MAX_NODES];
+        int count = 0;
+        ui_dock_collect_leaves(dock, dock->root, leaves, &count, UI_DOCK_MAX_NODES);
+        for (int i = 0; i < count; i++)
+                if (ui_dock_remove_tab_from_leaf(dock, leaves[i], tab_id))
+                        return;
+}
+
+bool ui_dock_is_animating(const UIDockState *dock)
+{
+        if (!dock)
+                return false;
+
+        if (dock->dragging_tab >= 0 || dock->pending_tab >= 0)
+                return true;
+
+        for (int i = 0; i < UI_DOCK_MAX_NODES; i++)
+                if (dock->nodes[i].in_use && dock->nodes[i].kind == UI_DOCK_NODE_SPLIT_H && dock->nodes[i].dragging_splitter)
+                        return true;
+        return false;
+}
+
+void ui_dock_begin_frame(UIDockState *dock, int x, int y, int w, int h)
+{
+        if (!dock)
+                return;
+
+        int ox = active_view ? active_view->x : 0;
+        int oy = active_view ? active_view->y : 0;
+        dock->bounds = (View){x + ox, y + oy, w, h};
+        ui_dock_layout_node(dock, dock->root, dock->bounds);
+
+        if (!ui_dock_is_leaf_node(dock, dock->active_leaf))
+                dock->active_leaf = ui_dock_first_leaf_from(dock, dock->root);
+
+        if (term_mouse.clicked || term_mouse.wheel != 0 || term_mouse.left)
+        {
+                int leaf = ui_dock_leaf_at_point(dock, dock->root, term_mouse.x, term_mouse.y);
+                if (leaf >= 0)
+                        dock->active_leaf = leaf;
+        }
+}
+
+bool ui_dock_leaf_get(const UIDockState *dock, int leaf_idx, View *out_view, int *out_active_tab, bool *out_active)
+{
+        if (!ui_dock_is_leaf_node(dock, leaf_idx))
+                return false;
+        const UIDockNode *leaf = &dock->nodes[leaf_idx];
+        if (out_view)
+                *out_view = leaf->view;
+        if (out_active_tab)
+                *out_active_tab = leaf->active_tab;
+        if (out_active)
+                *out_active = (leaf_idx == dock->active_leaf);
+        return true;
+}
+
+int ui_dock_take_close_request(UIDockState *dock)
+{
+        int result = dock ? dock->close_request_tab : -1;
+        if (dock)
+                dock->close_request_tab = -1;
+        return result;
+}
+
+int ui_dock_take_add_request_leaf(UIDockState *dock)
+{
+        int result = dock ? dock->add_request_leaf : -1;
+        if (dock)
+                dock->add_request_leaf = -1;
+        return result;
+}
+
+void ui_dock_draw(UIDockState *dock, const UITab *tabs, int tab_count, Color bar_bg, Color active_bg, Color divider_fg, Color bg)
+{
+        if (!dock)
+                return;
+        (void)tab_count;
+
+        dock->close_request_tab = -1;
+        dock->add_request_leaf = -1;
+
+        int leaves[UI_DOCK_MAX_NODES];
+        int leaf_count = 0;
+        ui_dock_collect_leaves(dock, dock->root, leaves, &leaf_count, UI_DOCK_MAX_NODES);
+
+        for (int leaf_ord = 0; leaf_ord < leaf_count; leaf_ord++)
+        {
+                int leaf_idx = leaves[leaf_ord];
+                UIDockNode *leaf = &dock->nodes[leaf_idx];
+
+                ui_set_view(&leaf->view);
+                ui_suppress_mouse(leaf_idx != dock->active_leaf);
+
+                UITab leaf_tabs[UI_DOCK_MAX_TABS];
+                for (int i = 0; i < leaf->tab_count; i++)
+                {
+                        int tab_id = leaf->tabs[i];
+                        leaf_tabs[i] = tabs[tab_id];
+                        leaf_tabs[i].active = (tab_id == leaf->active_tab);
+                        leaf_tabs[i].closable = (leaf->tab_count > 1 || leaf_count > 1);
+                }
+
+                UITabBarResult bar = ui_tab_bar(leaf->view.w, leaf_tabs, leaf->tab_count, true, bar_bg, active_bg);
+                if (leaf_idx == dock->active_leaf)
+                {
+                        if (bar.close_tab >= 0)
+                                dock->close_request_tab = leaf->tabs[bar.close_tab];
+                        if (bar.clicked_tab >= 0)
+                        {
+                                leaf->active_tab = leaf->tabs[bar.clicked_tab];
+                                dock->pending_tab = leaf->active_tab;
+                                dock->pending_leaf = leaf_idx;
+                                dock->pending_start_x = term_mouse.x;
+                                dock->pending_frames = 0;
+                        }
+                        if (bar.add_clicked)
+                                dock->add_request_leaf = leaf_idx;
+                }
+        }
+
+        ui_set_view(NULL);
+        ui_suppress_mouse(false);
+
+        if (dock->pending_tab >= 0)
+        {
+                if (!term_mouse.left)
+                        dock->pending_tab = -1;
+                else
+                {
+                        dock->pending_frames++;
+                        if (dock->pending_frames >= 2 && abs(term_mouse.x - dock->pending_start_x) > 2)
+                        {
+                                dock->dragging_tab = dock->pending_tab;
+                                dock->drag_src_leaf = dock->pending_leaf;
+                                dock->drag_start_x = dock->pending_start_x;
+                                dock->pending_tab = -1;
+                        }
+                }
+        }
+
+        if (dock->dragging_tab >= 0)
+        {
+                if (!term_mouse.left)
+                {
+                        int src = dock->drag_src_leaf;
+                        int dst = ui_dock_leaf_at_point(dock, dock->root, term_mouse.x, term_mouse.y);
+                        UIDockDropKind drop_kind = ui_dock_drop_kind_for_leaf(dock, dst, src, term_mouse.x);
+
+                        if (drop_kind == UI_DOCK_DROP_MERGE)
+                        {
+                                ui_dock_remove_tab(dock, dock->dragging_tab);
+                                ui_dock_add_tab_to_leaf(dock, dst, dock->dragging_tab);
+                                dock->active_leaf = dst;
+                        }
+                        else if ((drop_kind == UI_DOCK_DROP_SPLIT_LEFT || drop_kind == UI_DOCK_DROP_SPLIT_RIGHT) && abs(term_mouse.x - dock->drag_start_x) > 5)
+                        {
+                                int new_leaf = ui_dock_split_leaf(dock, dst, drop_kind == UI_DOCK_DROP_SPLIT_LEFT);
+                                if (new_leaf >= 0)
+                                {
+                                        ui_dock_remove_tab(dock, dock->dragging_tab);
+                                        ui_dock_add_tab_to_leaf(dock, new_leaf, dock->dragging_tab);
+                                        dock->active_leaf = new_leaf;
+                                }
+                        }
+                        dock->dragging_tab = -1;
+                }
+                else
+                {
+                        int src = dock->drag_src_leaf;
+                        int dst = ui_dock_leaf_at_point(dock, dock->root, term_mouse.x, term_mouse.y);
+                        UIDockDropKind drop_kind = ui_dock_drop_kind_for_leaf(dock, dst, src, term_mouse.x);
+                        View preview = ui_dock_preview_rect_for_drop(dock, dst, drop_kind);
+
+                        if (preview.w > 0 && preview.h > 0)
+                        {
+                                Color overlay = (Color){40, 80, 160};
+                                for (int row = preview.y; row < preview.y + preview.h; row++)
+                                {
+                                        if (preview.x >= 0 && preview.x < term_width && row >= 0 && row < term_height)
+                                                canvas[row * term_width + preview.x].bg = overlay;
+                                        int rx = preview.x + preview.w - 1;
+                                        if (rx >= 0 && rx < term_width && row >= 0 && row < term_height)
+                                                canvas[row * term_width + rx].bg = overlay;
+                                }
+                                for (int col = preview.x; col < preview.x + preview.w && col < term_width; col++)
+                                        if (col >= 0)
+                                        {
+                                                if (preview.y >= 0 && preview.y < term_height)
+                                                        canvas[preview.y * term_width + col].bg = overlay;
+                                                int by = preview.y + preview.h - 1;
+                                                if (by >= 0 && by < term_height)
+                                                        canvas[by * term_width + col].bg = overlay;
+                                        }
+                                const char *label = tabs[dock->dragging_tab].label ? tabs[dock->dragging_tab].label : "";
+                                int len = 0;
+                                for (const char *c = label; *c; c++)
+                                        len++;
+                                ui_text(preview.x + (preview.w - len) / 2, preview.y + preview.h / 2, label, (Color){255, 255, 255}, overlay, true, false);
+                        }
+
+                        const char *label = tabs[dock->dragging_tab].label ? tabs[dock->dragging_tab].label : "";
+                        int len = 0;
+                        for (const char *c = label; *c; c++)
+                                len++;
+                        int tw = len + 2;
+                        int tx = term_mouse.x - tw / 2;
+                        int ty = term_mouse.y;
+                        if (ty >= dock->bounds.y && ty < dock->bounds.y + dock->bounds.h)
+                        {
+                                for (int col = tx; col < tx + tw && col < term_width; col++)
+                                        if (col >= 0)
+                                                canvas[ty * term_width + col] = (Cell){" ", (Color){255, 255, 255}, active_bg, true, false};
+                                ui_text(tx + 1, ty, label, (Color){255, 255, 255}, active_bg, true, false);
+                        }
+                }
+        }
+
+        if (dock->dragging_tab < 0)
+                ui_dock_draw_splitters(dock, dock->root, divider_fg, bg);
 }
 
 void ui_end(void)
@@ -900,14 +1715,17 @@ void ui_list_begin(UIListState *s, const UIListParams *p, int key)
         s->action_click_idx = -1;
         s->drop_target_idx = -1;
 
-        if (term_mouse.x != s->last_mouse_x || term_mouse.y != s->last_mouse_y)
+        if (s->is_box_selecting && s->active_box_selections && s->selections_cap > 0)
+                memset(s->active_box_selections, 0, s->selections_cap * sizeof(bool));
+
+        if (ui_get_mouse().x != s->last_mouse_x || ui_get_mouse().y != s->last_mouse_y)
         {
                 s->ignore_mouse = false;
-                s->last_mouse_x = term_mouse.x;
-                s->last_mouse_y = term_mouse.y;
+                s->last_mouse_x = ui_get_mouse().x;
+                s->last_mouse_y = ui_get_mouse().y;
         }
 
-        if (term_mouse.left || term_mouse.right || term_mouse.wheel != 0)
+        if (ui_get_mouse().left || ui_get_mouse().right || ui_get_mouse().wheel != 0)
                 s->ignore_mouse = false;
 
         if ((key >= KEY_UP && key <= KEY_SHIFT_PAGE_DOWN) || key == '\t' || key == ' ' || key == KEY_ENTER || key == KEY_BACKSPACE)
@@ -940,9 +1758,9 @@ void ui_list_begin(UIListState *s, const UIListParams *p, int key)
                 {
                         s->is_kb_dragging = true;
                         s->kb_drag_idx = s->selected_idx;
-                        int cols = (s->mode == UI_MODE_LIST) ? 1 : ((s->p.w - 1) / s->p.cell_w > 0 ? (s->p.w - 1) / s->p.cell_w : 1);
-                        s->kb_drag_x = s->p.x + (s->selected_idx % cols) * ((s->mode == UI_MODE_LIST) ? s->p.w - 1 : s->p.cell_w);
-                        s->kb_drag_y = s->p.y + (s->selected_idx / cols * ((s->mode == UI_MODE_LIST) ? 1 : s->p.cell_h)) - s->current_scroll;
+                        UIRect kb_rect = ui_list_item_rect(s, s->selected_idx);
+                        s->kb_drag_x = kb_rect.x;
+                        s->kb_drag_y = kb_rect.y;
                 }
                 else if (s->is_kb_dragging)
                 {
@@ -1029,42 +1847,42 @@ void ui_list_begin(UIListState *s, const UIListParams *p, int key)
         if (thumb_h < 1)
                 thumb_h = 1;
 
-        if (term_mouse.clicked && term_mouse.x == s->p.x + s->p.w - 1 && term_mouse.y >= s->p.y && term_mouse.y < s->p.y + s->p.h)
+        if (ui_get_mouse().clicked && ui_get_mouse().x == s->p.x + s->p.w - 1 && ui_get_mouse().y >= s->p.y && ui_get_mouse().y < s->p.y + s->p.h)
         {
                 s->dragging_scroll = true;
                 int thumb_top = s->p.y + (max_scroll > 0 ? (int)((s->current_scroll / max_scroll) * (s->p.h - thumb_h)) : 0);
-                s->drag_offset = (term_mouse.y >= thumb_top && term_mouse.y < thumb_top + thumb_h) ? (float)(term_mouse.y - thumb_top) : (float)thumb_h / 2.0f;
+                s->drag_offset = (ui_get_mouse().y >= thumb_top && ui_get_mouse().y < thumb_top + thumb_h) ? (float)(ui_get_mouse().y - thumb_top) : (float)thumb_h / 2.0f;
         }
 
-        if (!term_mouse.left)
+        if (!ui_get_mouse().left)
                 s->dragging_scroll = false;
 
         if (s->dragging_scroll && max_scroll > 0)
         {
-                float cr = (float)(term_mouse.y - s->p.y - s->drag_offset) / (s->p.h - thumb_h > 0 ? s->p.h - thumb_h : 1);
+                float cr = (float)(ui_get_mouse().y - s->p.y - s->drag_offset) / (s->p.h - thumb_h > 0 ? s->p.h - thumb_h : 1);
                 s->target_scroll = s->current_scroll = (cr < 0 ? 0 : cr > 1 ? 1
                                                                             : cr) *
                                                        max_scroll;
                 s->scroll_velocity = 0.0f;
         }
 
-        if (term_mouse.wheel != 0)
+        if (ui_get_mouse().wheel != 0)
         {
                 float base_power = (s->mode == UI_MODE_LIST) ? 0.18f : ((float)c_h * 0.1f);
-                float wheel_dir = term_mouse.wheel > 0 ? 1.0f : -1.0f;
+                float wheel_dir = ui_get_mouse().wheel > 0 ? 1.0f : -1.0f;
                 float vel_dir = s->scroll_velocity > 0 ? 1.0f : (s->scroll_velocity < 0 ? -1.0f : 0.0f);
 
                 if (vel_dir != 0.0f && vel_dir != wheel_dir)
                         s->scroll_velocity = 0.0f;
                 if (vel_dir == wheel_dir && ui_fabsf(s->scroll_velocity) > 0.05f)
                         base_power *= (2.5f + ui_fabsf(s->scroll_velocity) * 1.2f);
-                s->scroll_velocity += term_mouse.wheel * base_power;
+                s->scroll_velocity += ui_get_mouse().wheel * base_power;
         }
 
         s->target_scroll += s->scroll_velocity * term_dt_scale;
         s->scroll_velocity *= ui_powf(0.82f, term_dt_scale);
 
-        if (s != &global_ctx.list && (s->dragging_scroll || term_mouse.wheel != 0))
+        if (s != &global_ctx.list && (s->dragging_scroll || ui_get_mouse().wheel != 0))
         {
                 global_ctx.active = false;
                 global_ctx.w = 0;
@@ -1104,10 +1922,10 @@ bool ui_list_do_item(UIListState *s, int index, UIItemResult *res)
 
         if (s->is_box_selecting)
         {
-                int bx = s->box_start_x < term_mouse.x ? s->box_start_x : term_mouse.x;
-                int bw = abs(term_mouse.x - s->box_start_x) + 1;
-                float world_by = s->box_start_y_world < (term_mouse.y + s->current_scroll) ? s->box_start_y_world : (term_mouse.y + s->current_scroll);
-                float world_bh = ui_fabsf((term_mouse.y + s->current_scroll) - s->box_start_y_world) + 1;
+                int bx = s->box_start_x < ui_get_mouse().x ? s->box_start_x : ui_get_mouse().x;
+                int bw = abs(ui_get_mouse().x - s->box_start_x) + 1;
+                float world_by = s->box_start_y_world < (ui_get_mouse().y + s->current_scroll) ? s->box_start_y_world : (ui_get_mouse().y + s->current_scroll);
+                float world_bh = ui_fabsf((ui_get_mouse().y + s->current_scroll) - s->box_start_y_world) + 1;
 
                 if (r.x < bx + bw && r.x + r.w > bx && item_world_y < world_by + world_bh && item_world_y + r.h > world_by)
                         s->active_box_selections[index] = true;
@@ -1117,14 +1935,14 @@ bool ui_list_do_item(UIListState *s, int index, UIItemResult *res)
                 return false;
         *res = (UIItemResult){.x = r.x, .y = r.y, .w = r.w, .h = r.h};
 
-        bool over_ctx_menu = global_ctx.active && (s != &global_ctx.list) && term_mouse.x >= global_ctx.x && term_mouse.x < global_ctx.x + global_ctx.w && term_mouse.y >= global_ctx.y && term_mouse.y < global_ctx.y + global_ctx.h;
-        res->hovered = (!s->ignore_mouse && !over_ctx_menu && !s->dragging_scroll && !s->is_box_selecting && term_mouse.x >= r.x && term_mouse.x < r.x + r.w && term_mouse.y >= r.y && term_mouse.y < r.y + r.h && term_mouse.y >= s->p.y && term_mouse.y < s->p.y + s->p.h && term_mouse.x < s->p.x + s->p.w - 1);
+        bool over_ctx_menu = global_ctx.active && (s != &global_ctx.list) && ui_get_mouse().x >= global_ctx.x && ui_get_mouse().x < global_ctx.x + global_ctx.w && ui_get_mouse().y >= global_ctx.y && ui_get_mouse().y < global_ctx.y + global_ctx.h;
+        res->hovered = (!s->ignore_mouse && !over_ctx_menu && !s->dragging_scroll && !s->is_box_selecting && ui_get_mouse().x >= r.x && ui_get_mouse().x < r.x + r.w && ui_get_mouse().y >= r.y && ui_get_mouse().y < r.y + r.h && ui_get_mouse().y >= s->p.y && ui_get_mouse().y < s->p.y + s->p.h && ui_get_mouse().x < s->p.x + s->p.w - 1);
 
-        bool is_hit = (s->mode == UI_MODE_GRID) ? !(term_mouse.x == r.x || term_mouse.x == r.x + r.w - 1 || term_mouse.y == r.y || term_mouse.y == r.y + r.h - 1) : (term_mouse.x <= r.x + 35);
+        bool is_hit = (s->mode == UI_MODE_GRID) ? !(ui_get_mouse().x == r.x || ui_get_mouse().x == r.x + r.w - 1 || ui_get_mouse().y == r.y || ui_get_mouse().y == r.y + r.h - 1) : (ui_get_mouse().x <= r.x + 35);
 
-        res->pressed = (res->hovered && term_mouse.left);
-        res->clicked = (res->hovered && term_mouse.clicked);
-        res->right_clicked = (res->hovered && term_mouse.right_clicked);
+        res->pressed = (res->hovered && ui_get_mouse().left);
+        res->clicked = (res->hovered && ui_get_mouse().clicked);
+        res->right_clicked = (res->hovered && ui_get_mouse().right_clicked);
 
         if (res->clicked || res->right_clicked)
         {
@@ -1134,7 +1952,7 @@ bool ui_list_do_item(UIListState *s, int index, UIItemResult *res)
                         s->clicked_on_item = true;
                         if (res->clicked)
                         {
-                                if (term_mouse.ctrl)
+                                if (ui_get_mouse().ctrl)
                                 {
                                         s->selections[index] = !s->selections[index];
                                 }
@@ -1152,13 +1970,13 @@ bool ui_list_do_item(UIListState *s, int index, UIItemResult *res)
                 }
         }
 
-        if (res->hovered && term_mouse.clicked && is_hit && s->drag_idx == -1 && !s->dragging_scroll && !global_ctx.active)
+        if (res->hovered && ui_get_mouse().clicked && is_hit && s->drag_idx == -1 && !s->dragging_scroll && !global_ctx.active)
         {
                 s->drag_idx = index;
-                s->drag_start_x = term_mouse.x;
-                s->drag_start_y = term_mouse.y;
-                s->drag_off_x = term_mouse.x - r.x;
-                s->drag_off_y = term_mouse.y - r.y;
+                s->drag_start_x = ui_get_mouse().x;
+                s->drag_start_y = ui_get_mouse().y;
+                s->drag_off_x = ui_get_mouse().x - r.x;
+                s->drag_off_y = ui_get_mouse().y - r.y;
         }
 
         res->is_selected = s->selections[index] || s->active_box_selections[index];
@@ -1177,58 +1995,73 @@ void ui_list_end(UIListState *s)
         int rows = (s->p.item_count + cols - 1) / cols;
         int max_scroll = rows * c_h > s->p.h ? rows * c_h - s->p.h : 0;
 
-        if (term_mouse.clicked && !s->clicked_on_item && !s->dragging_scroll && !global_ctx.active)
+        if (ui_get_mouse().clicked && !s->clicked_on_item && !s->dragging_scroll && !global_ctx.active)
         {
-                if (term_mouse.x >= s->p.x && term_mouse.x < s->p.x + s->p.w - 1 && term_mouse.y >= s->p.y && term_mouse.y < s->p.y + s->p.h)
+                if (ui_get_mouse().x >= s->p.x && ui_get_mouse().x < s->p.x + s->p.w - 1 && ui_get_mouse().y >= s->p.y && ui_get_mouse().y < s->p.y + s->p.h)
                 {
                         s->selected_idx = -1;
-                        if (!term_mouse.ctrl)
+                        if (!ui_get_mouse().ctrl)
                                 ui_list_clear_selections(s);
                         s->is_box_selecting = true;
-                        s->box_start_x = term_mouse.x;
-                        s->box_start_y_world = term_mouse.y + s->current_scroll;
+                        s->box_start_x = ui_get_mouse().x;
+                        s->box_start_y_world = ui_get_mouse().y + s->current_scroll;
                 }
         }
 
         if (s->is_box_selecting)
         {
-                if (!term_mouse.left)
+                if (!ui_get_mouse().left)
                 {
-                        for (int i = 0; i < s->p.item_count; i++)
-                                if (s->active_box_selections[i])
-                                        s->selections[i] = true;
+                        if (ui_mouse_in_active_view())
+                        {
+                                for (int i = 0; i < s->p.item_count; i++)
+                                        if (s->active_box_selections[i])
+                                                s->selections[i] = true;
+                        }
+                        else if (s->active_box_selections && s->selections_cap > 0)
+                        {
+                                memset(s->active_box_selections, 0, s->selections_cap * sizeof(bool));
+                        }
                         s->is_box_selecting = false;
                 }
-                else
+                else if (ui_mouse_in_active_view())
                 {
                         int start_screen_y = (int)(s->box_start_y_world - s->current_scroll);
-                        int curr_screen_y = term_mouse.y;
-                        int bx = s->box_start_x < term_mouse.x ? s->box_start_x : term_mouse.x;
+                        int curr_screen_y = ui_get_mouse().y;
+                        int bx = s->box_start_x < ui_get_mouse().x ? s->box_start_x : ui_get_mouse().x;
                         int by = start_screen_y < curr_screen_y ? start_screen_y : curr_screen_y;
-                        int bw = abs(term_mouse.x - s->box_start_x) + 1;
+                        int bw = abs(ui_get_mouse().x - s->box_start_x) + 1;
                         int bh = abs(curr_screen_y - start_screen_y) + 1;
                         Color box_clr = {60, 100, 180};
+                        int vox = active_view ? active_view->x : 0;
+                        int voy = active_view ? active_view->y : 0;
 
                         for (int x = bx; x < bx + bw; x++)
                         {
-                                if (x >= 0 && x < term_width && by >= s->p.y && by < s->p.y + s->p.h)
-                                        canvas[by * term_width + x].bg = box_clr;
-                                if (x >= 0 && x < term_width && by + bh - 1 >= s->p.y && by + bh - 1 < s->p.y + s->p.h)
-                                        canvas[(by + bh - 1) * term_width + x].bg = box_clr;
+                                int ax = x + vox;
+                                if (ax >= 0 && ax < term_width && by + voy >= s->p.y && by + voy < s->p.y + s->p.h)
+                                        canvas[(by + voy) * term_width + ax].bg = box_clr;
+                                if (ax >= 0 && ax < term_width && by + bh - 1 + voy >= s->p.y && by + bh - 1 + voy < s->p.y + s->p.h)
+                                        canvas[(by + bh - 1 + voy) * term_width + ax].bg = box_clr;
                         }
                         for (int y = by; y < by + bh; y++)
                         {
-                                if (bx >= 0 && bx < term_width && y >= s->p.y && y < s->p.y + s->p.h)
-                                        canvas[y * term_width + bx].bg = box_clr;
-                                if (bx + bw - 1 >= 0 && bx + bw - 1 < term_width && y >= s->p.y && y < s->p.y + s->p.h)
-                                        canvas[y * term_width + bx + bw - 1].bg = box_clr;
+                                int ay = y + voy;
+                                if (bx + vox >= 0 && bx + vox < term_width && ay >= s->p.y && ay < s->p.y + s->p.h)
+                                        canvas[ay * term_width + bx + vox].bg = box_clr;
+                                if (bx + bw - 1 + vox >= 0 && bx + bw - 1 + vox < term_width && ay >= s->p.y && ay < s->p.y + s->p.h)
+                                        canvas[ay * term_width + bx + bw - 1 + vox].bg = box_clr;
                         }
+                }
+                else if (s->active_box_selections && s->selections_cap > 0)
+                {
+                        memset(s->active_box_selections, 0, s->selections_cap * sizeof(bool));
                 }
         }
 
         if (max_scroll > 0)
         {
-                bool hover = (!s->dragging_scroll && term_mouse.x == s->p.x + s->p.w - 1 && term_mouse.y >= s->p.y && term_mouse.y < s->p.y + s->p.h);
+                bool hover = (!s->dragging_scroll && ui_get_mouse().x == s->p.x + s->p.w - 1 && ui_get_mouse().y >= s->p.y && ui_get_mouse().y < s->p.y + s->p.h);
                 Color thumb_col = s->dragging_scroll ? (Color){255, 255, 255} : s->p.scrollbar_fg;
                 int thumb_h_half = (s->p.h * 2) * s->p.h / (rows * c_h);
                 if (thumb_h_half < 2)
@@ -1254,14 +2087,14 @@ void ui_list_end(UIListState *s)
 
         if (s->drag_idx != -1)
         {
-                if (term_mouse.left)
+                if (ui_get_mouse().left)
                 {
-                        if (!s->is_dragging && (ui_fabsf(term_mouse.x - s->drag_start_x) > 0 || ui_fabsf(term_mouse.y - s->drag_start_y) > 0))
+                        if (!s->is_dragging && (ui_fabsf(ui_get_mouse().x - s->drag_start_x) > 1 || ui_fabsf(ui_get_mouse().y - s->drag_start_y) > 1))
                         {
                                 s->is_dragging = true;
                                 s->pickup_anim = 1.0f;
-                                s->carry_x = term_mouse.x - (s->mode == UI_MODE_LIST ? 2 : s->drag_off_x);
-                                s->carry_y = term_mouse.y - (s->mode == UI_MODE_LIST ? 1 : s->drag_off_y);
+                                s->carry_x = ui_get_mouse().x - (s->mode == UI_MODE_LIST ? 2 : s->drag_off_x);
+                                s->carry_y = ui_get_mouse().y - (s->mode == UI_MODE_LIST ? 1 : s->drag_off_y);
                         }
                 }
                 else
@@ -1294,15 +2127,15 @@ void ui_list_tick_animations(UIListState *s, int sel_x, int sel_y)
 {
         if (s->is_dragging)
         {
-                s->carry_x = term_mouse.x - (s->mode == UI_MODE_LIST ? 2 : s->drag_off_x);
-                s->carry_y = term_mouse.y - (s->mode == UI_MODE_LIST ? 1 : s->drag_off_y);
+                s->carry_x = ui_get_mouse().x - (s->mode == UI_MODE_LIST ? 2 : s->drag_off_x);
+                s->carry_y = ui_get_mouse().y - (s->mode == UI_MODE_LIST ? 1 : s->drag_off_y);
         }
         else if (s->carrying)
         {
                 if (!s->ignore_mouse)
                 {
-                        s->carry_x += (term_mouse.x - s->carry_x) * ANIM_SPEED_CARRY;
-                        s->carry_y += (term_mouse.y - s->carry_y) * ANIM_SPEED_CARRY;
+                        s->carry_x += (ui_get_mouse().x - s->carry_x) * ANIM_SPEED_CARRY;
+                        s->carry_y += (ui_get_mouse().y - s->carry_y) * ANIM_SPEED_CARRY;
                 }
                 else
                 {
@@ -1331,8 +2164,10 @@ bool ui_list_get_anim_coords(UIListState *s, int base_x, int base_y, bool is_dro
         if (is_dropped || (is_picked_up && s->pickup_anim > 0.01f))
         {
                 float e = is_dropped ? s->drop_anim * s->drop_anim : s->pickup_anim * s->pickup_anim;
-                *out_x = is_dropped ? (s->drop_to_target ? s->drop_dst_x + (s->carry_x - s->drop_dst_x) * e : base_x + (s->carry_x - base_x) * e) : s->carry_x + (base_x - s->carry_x) * e;
-                *out_y = is_dropped ? (s->drop_to_target ? s->drop_dst_y + (s->carry_y - s->drop_dst_y) * e : base_y + (s->carry_y - base_y) * e) : s->carry_y + (base_y - s->carry_y) * e;
+                float fx = is_dropped ? (s->drop_to_target ? s->drop_dst_x + (s->carry_x - s->drop_dst_x) * e : base_x + (s->carry_x - base_x) * e) : s->carry_x + (base_x - s->carry_x) * e;
+                float fy = is_dropped ? (s->drop_to_target ? s->drop_dst_y + (s->carry_y - s->drop_dst_y) * e : base_y + (s->carry_y - base_y) * e) : s->carry_y + (base_y - s->carry_y) * e;
+                *out_x = (int)(fx + (fx >= 0 ? 0.5f : -0.5f));
+                *out_y = (int)(fy + (fy >= 0 ? 0.5f : -0.5f));
                 return true;
         }
         return false;
@@ -1343,8 +2178,10 @@ bool ui_list_get_fly_coords(UIListState *s, int *out_x, int *out_y)
         if (s->fly_anim > 0.0f)
         {
                 float ease = s->fly_anim * s->fly_anim;
-                *out_x = s->fly_is_pickup ? s->carry_x + (s->fly_origin_x - s->carry_x) * ease : s->fly_origin_x + (s->carry_x - s->fly_origin_x) * ease;
-                *out_y = s->fly_is_pickup ? s->carry_y + (s->fly_origin_y - s->carry_y) * ease : s->fly_origin_y + (s->carry_y - s->fly_origin_y) * ease;
+                float fx = s->fly_is_pickup ? s->carry_x + (s->fly_origin_x - s->carry_x) * ease : s->fly_origin_x + (s->carry_x - s->fly_origin_x) * ease;
+                float fy = s->fly_is_pickup ? s->carry_y + (s->fly_origin_y - s->carry_y) * ease : s->fly_origin_y + (s->carry_y - s->fly_origin_y) * ease;
+                *out_x = (int)(fx + (fx >= 0 ? 0.5f : -0.5f));
+                *out_y = (int)(fy + (fy >= 0 ? 0.5f : -0.5f));
                 return true;
         }
         return false;
@@ -1352,7 +2189,7 @@ bool ui_list_get_fly_coords(UIListState *s, int *out_x, int *out_y)
 
 void ui_context_open(int target_idx)
 {
-        global_ctx = (UIContextState){.active = true, .x = term_mouse.x, .y = term_mouse.y, .w = 0};
+        global_ctx = (UIContextState){.active = true, .x = ui_get_mouse().x, .y = ui_get_mouse().y, .w = 0};
         global_ctx.list.selected_idx = -1;
         global_ctx.list.mode = UI_MODE_LIST;
         global_ctx_target = target_idx;
@@ -1431,8 +2268,8 @@ bool ui_context_do(const char **items, int count, int *out_idx)
                 }
         }
 
-        if ((term_mouse.clicked || term_mouse.right_clicked) && !action_taken && !global_ctx.list.dragging_scroll)
-                if (!(term_mouse.x >= global_ctx.x && term_mouse.x < global_ctx.x + params.w && term_mouse.y >= global_ctx.y && term_mouse.y < global_ctx.y + params.h))
+        if ((ui_get_mouse().clicked || ui_get_mouse().right_clicked) && !action_taken && !global_ctx.list.dragging_scroll)
+                if (!(ui_get_mouse().x >= global_ctx.x && ui_get_mouse().x < global_ctx.x + params.w && ui_get_mouse().y >= global_ctx.y && ui_get_mouse().y < global_ctx.y + params.h))
                 {
                         global_ctx.active = false;
                         global_ctx.w = 0;
@@ -1453,7 +2290,7 @@ bool ui_text_input(int x, int y, int w, char *buf, size_t buf_size, int key, boo
                 int len = strlen(buf);
                 if (key == KEY_BACKSPACE && len > 0)
                         buf[len - 1] = '\0';
-                else if (key >= 32 && key <= 126 && len < buf_size - 1)
+                else if (key >= 32 && key <= 126 && (size_t)len + 1 < buf_size)
                 {
                         buf[len] = (char)key;
                         buf[len + 1] = '\0';

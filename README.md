@@ -11,6 +11,8 @@ This project is a demo project of Prism, the [Robust C transpiler](https://githu
 prism run explore.c
 ```
 
+This launches an interactive terminal UI and stays open until you quit it. Use `q` to quit, or `Esc` when nothing is selected/carried.
+
 or just build:
 ```sh
 prism -O3 -s -flto explore.c -o explore
