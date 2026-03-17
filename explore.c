@@ -594,8 +594,7 @@ void draw_item_list(AppState *app, FileEntry *e, int x, int y, int w, int h, boo
                 ui_rect(x, y, w, 1, item_bg, invert && !is_ghost);
         }
 
-        ui_text(x, y, e->is_dir ? "▓]" : "■ ", icon_fg, item_bg, false, false);
-
+        ui_text(x, y, e->is_dir ? (((e - app->entries) % 2 == 0) ? "▓]" : "▒]") : "■ ", icon_fg, item_bg, false, false);
         int name_x = x + 3;
 
         if (has_git)
