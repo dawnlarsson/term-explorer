@@ -215,101 +215,6 @@ static char out_buf[1024 * 1024];
 static UIContextState global_ctx;
 static int global_ctx_target = -1;
 
-typedef struct
-{
-        float x, y, vx, vy, life;
-        Color color;
-} UIParticle;
-
-UIParticle term_particles[1024];
-int term_particle_count = 0;
-
-void ui_spawn_particle(float x, float y, float vx, float vy, Color c, float life)
-{
-        if (term_particle_count < 1024)
-                term_particles[term_particle_count++] = (UIParticle){x, y, vx, vy, life, c};
-}
-
-void ui_burst_particles(int cx, int cy, int count, Color c)
-{
-        int ox = active_view ? active_view->x : 0;
-        int oy = active_view ? active_view->y : 0;
-        for (int i = 0; i < count; i++)
-        {
-                float vx = ((rand() % 100) / 50.0f) - 1.0f;
-                float vy = ((rand() % 100) / 50.0f) - 2.0f;
-
-                ui_spawn_particle((float)(cx + ox), (float)((cy + oy) * 2 + 1), vx * 2.0f, vy * 1.5f, c, 10.0f + (rand() % 15));
-        }
-}
-
-void ui_scale_region(int x, int y, int w, int h, float scale, Color clear_bg)
-{
-        if (scale >= 0.99f && scale <= 1.01f)
-                return;
-        if (scale <= 0.01f)
-                scale = 0.01f;
-        if (w * h > 2048)
-                return;
-
-        int ox = active_view ? active_view->x : 0;
-        int oy = active_view ? active_view->y : 0;
-        int clip_x0 = active_view ? active_view->x : 0;
-        int clip_y0 = active_view ? active_view->y : 0;
-        int clip_x1 = active_view ? active_view->x + active_view->w : term_width;
-        int clip_y1 = active_view ? active_view->y + active_view->h : term_height;
-
-        x += ox;
-        y += oy;
-
-        raw Cell temp[2048];
-        for (int r = 0; r < h; r++)
-        {
-                for (int c = 0; c < w; c++)
-                {
-                        int cx = x + c, cy = y + r;
-                        if (cx >= clip_x0 && cx < clip_x1 && cy >= clip_y0 && cy < clip_y1)
-                                temp[r * w + c] = canvas[cy * term_width + cx];
-                        else
-                                temp[r * w + c] = (Cell){" ", clear_bg, clear_bg, false, false};
-                }
-        }
-
-        for (int r = 0; r < h; r++)
-        {
-                for (int c = 0; c < w; c++)
-                {
-                        int cx = x + c, cy = y + r;
-                        if (cx >= clip_x0 && cx < clip_x1 && cy >= clip_y0 && cy < clip_y1)
-                                canvas[cy * term_width + cx] = (Cell){" ", clear_bg, clear_bg, false, false};
-                }
-        }
-
-        int nw = (int)(w * scale), nh = (int)(h * scale);
-        if (nw == 0)
-                nw = 1;
-        if (nh == 0)
-                nh = 1;
-
-        int nx = x + (w - nw) / 2, ny = y + (h - nh) / 2;
-
-        for (int r = 0; r < nh; r++)
-        {
-                for (int c = 0; c < nw; c++)
-                {
-                        int src_r = (int)(r / scale), src_c = (int)(c / scale);
-                        if (src_r >= h)
-                                src_r = h - 1;
-                        if (src_c >= w)
-                                src_c = w - 1;
-
-                        int cx = nx + c, cy = ny + r;
-                        if (cx >= clip_x0 && cx < clip_x1 && cy >= clip_y0 && cy < clip_y1)
-                                canvas[cy * term_width + cx] = temp[src_r * w + src_c];
-                }
-        }
-}
-
 static bool ui_mouse_in_active_view(void)
 {
         if (!active_view)
@@ -1633,30 +1538,6 @@ void ui_dock_draw(UIDockState *dock, const UITab *tabs, int tab_count, Color bar
 
 void ui_end(void)
 {
-        for (int i = 0; i < term_particle_count; i++)
-        {
-                UIParticle *p = &term_particles[i];
-                p->x += p->vx * term_dt_scale;
-                p->y += p->vy * term_dt_scale;
-                p->vy += 0.2f * term_dt_scale;
-                p->life -= term_dt_scale;
-
-                if (p->life <= 0.0f)
-                {
-                        term_particles[i] = term_particles[--term_particle_count];
-                        i--;
-                        continue;
-                }
-
-                int px = (int)p->x;
-                int py = (int)p->y;
-                if (px >= 0 && px < term_width && py >= 0 && py < term_height * 2)
-                {
-                        Cell *c = &canvas[(py / 2) * term_width + px];
-                        c->fg = p->color;
-                        strcpy(c->ch, (py % 2 == 0) ? "\xe2\x96\x80" : "\xe2\x96\x84");
-                }
-        }
 
         if (!term_mouse.hide_cursor && term_mouse.x >= 0 && term_mouse.x < term_width && term_mouse.y >= 0 && term_mouse.y < term_height)
         {

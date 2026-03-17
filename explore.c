@@ -145,6 +145,8 @@ void rm_rf(const char *path)
 
 bool copy_path(const char *src, const char *dst)
 {
+        if (strncmp(dst, src, strlen(src)) == 0 && (dst[strlen(src)] == '/' || dst[strlen(src)] == '\0'))
+                return false;
         struct stat st;
         if (stat(src, &st) != 0)
                 return false;
@@ -409,7 +411,6 @@ void app_do_delete(AppState *app, int target_idx)
                                         strcpy(app->pop_paths[app->pop_count++], src_path);
 
                                         UIRect r = ui_list_item_rect(s, i);
-                                        ui_burst_particles(r.x + r.w / 2, r.y + r.h / 2, 15, clr_text);
                                 }
                         }
                 }
@@ -553,17 +554,6 @@ void draw_item_grid(AppState *app, FileEntry *e, int x, int y, int w, int h, boo
                 char badge[3] = {e->git_status[1] == ' ' ? e->git_status[0] : e->git_status[1], '\0'};
                 ui_text(x + w - 3, y, badge, base_text_clr, item_bg, true, false);
         }
-
-        float scale = 1.0f;
-        if (is_popping)
-                scale = app->pop_is_out ? app->pop_anim : (1.0f - app->pop_anim);
-        else if (is_pressed)
-                scale = 0.85f;
-        else if (is_ctx_target)
-                scale = 1.15f;
-
-        if (scale < 0.99f || scale > 1.01f)
-                ui_scale_region(x, y, w, h, scale, clr_bg);
 }
 
 void draw_item_list(AppState *app, FileEntry *e, int x, int y, int w, int h, bool is_sel, bool is_hover, bool is_ghost, bool is_drop_target, bool is_multi_sel, bool is_dropped, bool is_popping, bool is_pressed, bool is_ctx_target)
@@ -635,17 +625,6 @@ void draw_item_list(AppState *app, FileEntry *e, int x, int y, int w, int h, boo
                         snprintf(size_str, 32, "%4lld GB", (long long)(s >> 30));
                 ui_text(x + w - 7, y, size_str, is_ghost ? icon_fg : clr_bar, item_bg, false, false);
         }
-
-        float scale = 1.0f;
-        if (is_popping)
-                scale = app->pop_is_out ? app->pop_anim : (1.0f - app->pop_anim);
-        else if (is_pressed)
-                scale = 0.95f;
-        else if (is_ctx_target)
-                scale = 1.05f;
-
-        if (scale < 0.99f || scale > 1.01f)
-                ui_scale_region(x, y, w, h, scale, clr_bg);
 }
 
 void draw_item(AppState *app, FileEntry *e, UIItemResult *res, bool is_sel, bool is_ghost, bool is_dropped, bool is_popping, bool is_pressed, bool is_ctx_target)
@@ -685,9 +664,41 @@ void app_load_dir(AppState *app, const char *path)
         defer chdir(prev_cwd);
 
         if (app->cwd[0] && path[0] != '/')
-                (chdir(app->cwd) == 0) orelse return;
+        {
+                while (chdir(app->cwd) != 0)
+                {
+                        char *last_slash = strrchr(app->cwd, '/');
+                        if (!last_slash || last_slash == app->cwd)
+                        {
+                                strcpy(app->cwd, "/");
+                                chdir(app->cwd);
+                                break;
+                        }
+                        *last_slash = '\0';
+                }
+        }
 
-        (chdir(path) == 0) orelse return;
+        char mut_path[PATH_MAX];
+        strncpy(mut_path, path, PATH_MAX - 1);
+        mut_path[PATH_MAX - 1] = '\0';
+
+        while (chdir(mut_path) != 0)
+        {
+                if (mut_path[0] == '/')
+                {
+                        char *last_slash = strrchr(mut_path, '/');
+                        if (!last_slash || last_slash == mut_path)
+                        {
+                                chdir("/");
+                                break;
+                        }
+                        *last_slash = '\0';
+                }
+                else
+                {
+                        return;
+                }
+        }
 
         DIR *d = opendir(".");
         d orelse return;
@@ -1327,7 +1338,6 @@ void handle_input(AppState *app, int *key, const UIListParams *params)
                                                 if (strcmp(app->entries[i].name, "..") != 0)
                                                 {
                                                         UIRect br = ui_list_item_rect(s, i);
-                                                        ui_burst_particles(br.x + br.w / 2, br.y + br.h / 2, drag_multi ? 5 : 15, clr_text);
                                                 }
                                         }
                                 }
@@ -1426,7 +1436,6 @@ void app_process_drops(AppState *app)
 
         if (act->count > 0)
         {
-                ui_burst_particles(r.x + r.w / 2, r.y + r.h / 2, 20 * act->count, clr_folder);
                 ui_action_push(cb_undo_move, cb_redo_move, cb_free_move, act);
         }
         else
@@ -1870,7 +1879,7 @@ int main(int argc, char **argv)
                         if (a->next_dir[0] || ui_list_is_animating(&a->list) || a->pop_anim > 0.0f)
                                 animating = true;
                 }
-                int timeout = (animating || term_particle_count > 0 || ui_dock_is_animating(&dock)) ? term_anim_timeout : 1000;
+                int timeout = (animating || ui_dock_is_animating(&dock)) ? term_anim_timeout : 1000;
                 int key = term_poll(first_frame ? 0 : timeout);
 
                 ui_set_view(NULL);
