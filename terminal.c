@@ -357,7 +357,7 @@ static int rgb_to_ansi16(Color c, bool is_bg)
         return (is_bg ? (bright ? 100 : 40) : (bright ? 90 : 30)) + (r | (g << 1) | (b << 2));
 }
 
-#define SET_COL(fg, c) (c.r == -1 ? printf("\033[%d9m", fg ? 3 : 4) : (color_mode == 2 ? printf("\033[%d;2;%d;%d;%dm", fg ? 38 : 48, c.r, c.g, c.b) : printf("\033[%d;5;%dm", fg ? 38 : 48, 16 + (36 * (c.r / 51)) + (6 * (c.g / 51)) + (c.b / 51))))
+#define SET_COL(fg, c) (c.r == -1 ? printf("\033[%d9m", fg ? 3 : 4) : printf("\033[%d;2;%d;%d;%dm", fg ? 38 : 48, c.r, c.g, c.b))
 
 void term_restore(void)
 {

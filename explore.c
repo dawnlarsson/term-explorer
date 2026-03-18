@@ -505,7 +505,7 @@ void draw_item_grid(AppState *app, FileEntry *e, int x, int y, int w, int h, boo
 
         if (is_hover || is_sel || is_ghost || is_drop_target || is_multi_sel || is_popping)
         {
-                
+
                 ui_rect(x + 1, y, w - 2, h, item_bg, false);
         }
 
@@ -590,7 +590,7 @@ void draw_item_list(AppState *app, FileEntry *e, int x, int y, int w, int h, boo
         Color icon_fg = is_ghost ? (is_sel ? (Color){200, 200, 200} : (Color){100, 100, 100}) : (is_ignored ? (Color){100, 100, 100} : (e->is_dir ? clr_folder : (e->is_exec ? (Color){85, 255, 85} : base_text_clr)));
 
         {
-                
+
                 ui_rect(x, y, w, 1, item_bg, false);
         }
 
